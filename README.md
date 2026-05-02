@@ -1,90 +1,121 @@
-# Obsidian Sample Plugin
+# SyncFull - Plugin de Sincronização Completa para Obsidian
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+O SyncFull é um plugin de sincronização local completa para Obsidian, projetado para sincronizar todos os tipos de arquivos (texto e binários) entre seu vault e uma pasta de destino local ou em rede.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+## Funcionalidades Principais
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+### Sincronização Multi-tipo
+- **Arquivos de Texto**: Markdown, JSON, TXT, etc.
+- **Arquivos Binários**: Imagens, PDFs, áudio, vídeo, documentos Office
+- **Detecção Automática**: Identifica o tipo de arquivo pelo formato e trata cada um adequadamente
 
-## First time developing plugins?
+### Monitorização em Tempo Real
+- **Debounce Inteligente**: Aguarda 2.5 segundos para evitar múltiplas sincronizações durante edições rápidas
+- **Eventos do Vault**: Detecta criação, modificação e exclusão de arquivos automaticamente
+- **Fila de Processamento**: Organiza múltiplas alterações para processamento eficiente
 
-Quick starting guide for new plugin devs:
+### Gestão de Caminhos
+- **Path Mapping**: Configuração flexível do diretório de destino
+- **Validação Automática**: Verifica permissões e existência do caminho
+- **Criação de Diretórios**: Cria estrutura de pastas automaticamente se necessário
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+### Interface Intuitiva
+- **Status Bar**: Indicadores visuais em tempo real ( Conectado,  Sincronizando, Erro)
+- **Comandos Rápidos**: Forçar sincronização completa e validar destino
+- **Configurações Simples**: Interface limpa para configuração do caminho de destino
 
-## Releasing new releases
+## Requisitos
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+- **Obsidian**: Versão 0.15.0 ou superior
+- **Plataforma**: Apenas desktop (requer acesso ao sistema de arquivos)
+- **Sistema**: Windows, macOS ou Linux
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+## Instalação
 
-## Adding your plugin to the community plugin list
+### Instalação Manual
+1. Baixe os arquivos `main.js`, `manifest.json` e `styles.css` da última release
+2. Crie a pasta `.obsidian/plugins/syncfull-plugin/` no seu vault
+3. Copie os arquivos para esta pasta
+4. Ative o plugin nas configurações do Obsidian
 
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
+### Desenvolvimento
+```bash
+# Clone o repositório
+git clone https://github.com/SEU-USER/syncfull-plugin.git
+cd syncfull-plugin
 
-## How to use
+# Instale as dependências
+npm install
 
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
+# Inicie o desenvolvimento (modo watch)
+npm run dev
 
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+# Build para produção
+npm run build
 ```
 
-If you have multiple URLs, you can also do:
+## Configuração
 
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
-```
+1. Após instalar o plugin, vá em **Configurações > Comunidade Plugins > SyncFull**
+2. Configure o **Caminho de Destino** para a pasta onde deseja sincronizar:
+   - **Windows**: `C:\Backup\Obsidian` ou `\\NAS\Backup`
+   - **macOS**: `/Volumes/Backup/Obsidian`
+   - **Linux**: `/home/user/backup/obsidian`
 
-## API Documentation
+3. Use os comandos:
+   - **Ctrl/Cmd + P > "Forçar Sincronização"**: Sincroniza todos os arquivos
+   - **Ctrl/Cmd + P > "Validar Destino"**: Verifica se o caminho está acessível
 
-See https://docs.obsidian.md
+## Como Funciona
+
+### Fluxo de Sincronização
+1. **Detecção**: Eventos do vault acionam o monitoramento
+2. **Debounce**: Aguarda 2.5 segundos para agrupar alterações
+3. **Classificação**: Identifica arquivos binários vs texto
+4. **Leitura**: Usa método apropriado (`read()` ou `readBinary()`)
+5. **Escrita**: Salva no formato correto (UTF-8 ou ArrayBuffer)
+6. **Feedback**: Atualiza status bar e notificações
+
+### Tipos de Arquivos Suportados
+- **Imagens**: .jpg, .jpeg, .png, .gif, .bmp, .webp, .svg, .ico
+- **Áudio**: .mp3, .wav, .ogg, .flac, .aac
+- **Vídeo**: .mp4, .avi, .mov, .wmv, .flv, .mkv
+- **Documentos**: .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx
+- **Compactados**: .zip, .rar, .7z, .tar, .gz
+- **Executáveis**: .exe, .dll, .so, .dylib, .bin, .dat, .db, .sqlite
+
+## Solução de Problemas
+
+### Erros Comuns
+- **"Caminho não encontrado"**: Verifique se o diretório de destino existe e está acessível
+- **"Sem permissões de escrita"**: Certifique-se de ter permissões no diretório de destino
+- **"Sistema de ficheiros não inicializado"**: Configure o caminho de destino nas configurações
+
+### Logs de Depuração
+O plugin logs detalhados no console do desenvolvedor do Obsidian (Ctrl/Cmd + Shift + I):
+- `[SyncFull]` - Logs de operações normais
+- `[SyncFull] Erro` - Logs de erros para depuração
+
+## Contribuição
+
+Contribuições são bem-vindas! Por favor:
+
+1. Faça um fork do projeto
+2. Crie uma branch para sua feature (`git checkout -b feature/nova-funcionalidade`)
+3. Commit suas mudanças (`git commit -am 'Adiciona nova funcionalidade'`)
+4. Push para a branch (`git push origin feature/nova-funcionalidade`)
+5. Abra um Pull Request
+
+## Licença
+
+Este projeto está licenciado sob a Licença MIT - veja o arquivo [LICENSE](LICENSE) para detalhes.
+
+## Links
+
+- [Documentação Técnica](doc/Guia-Implementacao-SyncFull.md)
+- [Issues e Sugestões](https://github.com/SEU-USER/syncfull-plugin/issues)
+- [Releases](https://github.com/SEU-USER/syncfull-plugin/releases)
+
+---
+
+**SyncFull** - Sincronização completa, simples e confiável para seu Obsidian.

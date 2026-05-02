@@ -1,35 +1,37 @@
-import {App, PluginSettingTab, Setting} from "obsidian";
-import MyPlugin from "./main";
+import { App, PluginSettingTab, Setting } from "obsidian";
+import SyncFullPlugin from "./main";
 
 export interface MyPluginSettings {
-	mySetting: string;
+	destinationPath: string;
 }
 
 export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+	destinationPath: ''
 }
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class SyncFullSettingTab extends PluginSettingTab {
+	plugin: SyncFullPlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: SyncFullPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
+		containerEl.createEl('h2', { text: 'SyncFull - Configurações' });
+
 		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc('It\'s a secret')
+			.setName('Caminho de Destino')
+			.setDesc('Caminho absoluto para a pasta de sincronização (ex: /Volumes/Public/ ou C:\\Backup)')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Digite o caminho de destino...')
+				.setValue(this.plugin.settings.destinationPath)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.destinationPath = value;
 					await this.plugin.saveSettings();
 				}));
 	}
