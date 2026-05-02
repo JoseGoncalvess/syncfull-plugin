@@ -1,8 +1,8 @@
-# Plano de Implementação Detalhado - Sync Maestro
+# Plano de Implementação Detalhado - SyncFull
 
 ## 📋 Visão Geral
 
-Plugin de sincronização local bidirecional para Obsidian que serve como motor principal para sincronizar o vault ativo com uma pasta local ou unidade de rede, utilizando módulos nativos do Node.js (fs, path, crypto) disponíveis no ambiente Electron.
+Plugin de sincronização local completa para Obsidian que serve como motor principal para sincronizar o vault ativo com uma pasta local ou unidade de rede, utilizando módulos nativos do Node.js (fs, path, crypto) disponíveis no ambiente Electron.
 
 ---
 
@@ -25,41 +25,25 @@ Plugin de sincronização local bidirecional para Obsidian que serve como motor 
 
 ---
 
-### ⏳ Passo 2: Monitorização do Vault (Watcher)
-**Status:** ⏳ **Pendente**
+### ✅ Passo 2: Monitorização do Vault (Watcher) - CONCLUÍDO
+**Status:** ✅ **Concluído**
 
 **Objetivo:** Implementar eventos de monitorização com debounce para evitar múltiplos disparos.
 
-**Implementação necessária:**
-```typescript
-// No método onload() do main.ts
-this.registerEvent(
-    this.app.vault.on('modify', (file) => {
-        this.handleFileChange(file, 'modify');
-    })
-);
-
-this.registerEvent(
-    this.app.vault.on('create', (file) => {
-        this.handleFileChange(file, 'create');
-    })
-);
-
-this.registerEvent(
-    this.app.vault.on('delete', (file) => {
-        this.handleFileChange(file, 'delete');
-    })
-);
-```
-
-**Componentes a implementar:**
-- [ ] Sistema de debounce (2-3 segundos de inatividade)
-- [ ] Fila de sincronização (sync queue)
-- [ ] Método `handleFileChange()`
-- [ ] Timer para debounce
-- [ ] Filtragem de ficheiros (apenas .md)
+**Implementação realizada:**
+- ✅ Sistema de debounce (2.5 segundos de inatividade)
+- ✅ Fila de sincronização (sync queue)
+- ✅ Método `handleFileChange()`
+- ✅ Timer para debounce
+- ✅ Filtragem de ficheiros (apenas não ocultos)
+- ✅ Eventos para modify, create, delete
+- ✅ Integração completa com FileSystemModule
 
 **Dependências:** Nenhuma (API Obsidian nativa)
+
+**Arquivos modificados:**
+- ✅ `src/main.ts` - Eventos de monitorização e debounce
+- ✅ Integração com sistema de sincronização
 
 ---
 
@@ -182,12 +166,12 @@ O sistema está pronto para testes funcionais completos antes de avançar para o
 
 ## 🟡 FASE 2 - INTEGRIDADE E CONFIABILIDADE (Prioridade Média)
 
-### ⏳ Passo 5: Sistema de Hashing (SHA-256)
-**Status:** ⏳ **Pendente**
+### ✅ Passo 5: Sistema de Hashing (SHA-256) - CONCLUÍDO
+**Status:** ✅ **Concluído**
 
 **Objetivo:** Implementar verificação de integridade de ficheiros usando SHA-256.
 
-**Implementação necessária:**
+**Implementação realizada:**
 ```typescript
 // No FS Module
 async calculateFileHash(filePath: string): Promise<string> {
@@ -201,16 +185,20 @@ interface SyncMetadata {
         hash: string;
         lastSync: number;
         size: number;
-    }
+    };
 }
 ```
 
-**Componentes a implementar:**
-- [ ] Sistema de hashing SHA-256
-- [ ] Ficheiro `sync-metadata.json` no destino
-- [ ] Comparação de hashes para deteção de alterações
-- [ ] Cache de hashes para performance
-- [ ] Validação de integridade pós-cópia
+**Componentes implementados:**
+- ✅ Sistema de hashing SHA-256 para arquivos de texto e binários
+- ✅ Ficheiro `sync-metadata.json` no destino
+- ✅ Comparação de hashes para deteção de alterações
+- ✅ Cache de hashes para performance
+- ✅ Validação de integridade pós-cópia
+- ✅ Métodos loadSyncMetadata() e saveSyncMetadata()
+- ✅ Verificação de modificações com isFileModified()
+- ✅ Atualização automática de metadata
+- ✅ Remoção de metadata ao deletar arquivos
 
 **Dependências:** Passo 3 (FS Module)
 

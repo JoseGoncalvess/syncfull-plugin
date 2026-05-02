@@ -1,6 +1,6 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile } from 'obsidian';
 import { DEFAULT_SETTINGS, MyPluginSettings, SyncFullSettingTab } from "./settings";
-import { FileSystemModule } from "./fsModule";
+import { FileSystemModule, SyncMetadata } from "./fsModule";
 
 // Interface para eventos de ficheiro na fila de sincronização
 interface FileChangeEvent {
@@ -228,26 +228,47 @@ export default class SyncFullPlugin extends Plugin {
 		}
 
 		if (change.type === 'delete') {
-			// Eliminar ficheiro no destino
+			// Eliminar ficheiro no destino e remover do metadata
 			await this.fsModule.deleteFile(change.file.path);
+			await this.fsModule.removeFileMetadata(change.file.path);
 		} else {
 			// Determinar se é arquivo binário baseado na extensão
 			const isBinaryFile = this.isBinaryFile(change.file.path);
 
 			let content: string | ArrayBuffer;
+			let hash: string;
 
 			if (isBinaryFile) {
 				// Ler arquivo binário como ArrayBuffer
 				content = await this.app.vault.readBinary(change.file);
 				console.log(`[SyncFull] Lendo arquivo binário: ${change.file.path}`);
+
+				// Calcular hash do conteúdo binário
+				hash = require('crypto').createHash('sha256').update(new Uint8Array(content)).digest('hex');
 			} else {
 				// Ler arquivo de texto como string
 				content = await this.app.vault.read(change.file);
 				console.log(`[SyncFull] Lendo arquivo de texto: ${change.file.path}`);
+
+				// Calcular hash do conteúdo de texto
+				hash = require('crypto').createHash('sha256').update(content, 'utf-8').digest('hex');
+			}
+
+			// Verificar se o arquivo foi modificado usando o metadata
+			const isModified = await this.fsModule.isFileModified(change.file.path, hash, change.file.stat.size);
+
+			if (!isModified) {
+				console.log(`[SyncFull] Arquivo não modificado, pulando: ${change.file.path}`);
+				return; // Pular sincronização se não houver modificações
 			}
 
 			// Copiar para o destino
 			await this.fsModule.copyFile(change.file, content);
+
+			// Atualizar metadata de sincronização
+			await this.fsModule.updateFileMetadata(change.file.path, hash, change.file.stat.size);
+
+			console.log(`[SyncFull] Arquivo sincronizado com hash: ${change.file.path}`);
 		}
 	}
 
@@ -344,16 +365,36 @@ export default class SyncFullPlugin extends Plugin {
 				const isBinaryFile = this.isBinaryFile(file.path);
 
 				let content: string | ArrayBuffer;
+				let hash: string;
 
 				if (isBinaryFile) {
 					// Ler arquivo binário como ArrayBuffer
 					content = await this.app.vault.readBinary(file);
+
+					// Calcular hash do conteúdo binário
+					hash = require('crypto').createHash('sha256').update(new Uint8Array(content)).digest('hex');
 				} else {
 					// Ler arquivo de texto como string
 					content = await this.app.vault.read(file);
+
+					// Calcular hash do conteúdo de texto
+					hash = require('crypto').createHash('sha256').update(content, 'utf-8').digest('hex');
 				}
 
+				// Verificar se o arquivo foi modificado usando o metadata
+				const isModified = await this.fsModule.isFileModified(file.path, hash, file.stat.size);
+
+				if (!isModified) {
+					console.log(`[SyncFull] Arquivo não modificado, pulando: ${file.path}`);
+					continue; // Pular sincronização se não houver modificações
+				}
+
+				// Copiar para o destino
 				await this.fsModule.copyFile(file, content);
+
+				// Atualizar metadata de sincronização
+				await this.fsModule.updateFileMetadata(file.path, hash, file.stat.size);
+
 				successCount++;
 
 				// Atualizar progresso a cada 10 ficheiros

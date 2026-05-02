@@ -1,6 +1,18 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { TFile } from 'obsidian';
+
+/**
+ * Interface para metadata de sincronização
+ */
+export interface SyncMetadata {
+    [filePath: string]: {
+        hash: string;
+        lastSync: number;
+        size: number;
+    };
+}
 
 /**
  * Módulo de Sistema de Ficheiros para comunicação com a pasta de destino
@@ -243,5 +255,115 @@ export class FileSystemModule {
      */
     getDestinationPath(): string {
         return this.destinationPath;
+    }
+
+    /**
+     * Calcula hash SHA-256 de um arquivo
+     */
+    async calculateFileHash(filePath: string): Promise<string> {
+        if (!this.destinationPath) {
+            throw new Error('Caminho de destino não configurado');
+        }
+
+        const fullPath = path.join(this.destinationPath, filePath);
+
+        try {
+            const fileBuffer = await fs.readFile(fullPath);
+            const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+            console.log(`[SyncFull] Hash calculado: ${filePath} -> ${hash}`);
+            return hash;
+        } catch (error) {
+            throw new Error(`Falha ao calcular hash do arquivo ${filePath}: ${error instanceof Error ? error.message : 'Erro desconhecido'}`);
+        }
+    }
+
+    /**
+     * Carrega metadata de sincronização do arquivo sync-metadata.json
+     */
+    async loadSyncMetadata(): Promise<SyncMetadata> {
+        if (!this.destinationPath) {
+            return {};
+        }
+
+        const metadataPath = path.join(this.destinationPath, 'sync-metadata.json');
+
+        try {
+            const content = await fs.readFile(metadataPath, 'utf-8');
+            const metadata = JSON.parse(content) as SyncMetadata;
+            console.log(`[SyncFull] Metadata carregado: ${Object.keys(metadata).length} arquivos`);
+            return metadata;
+        } catch (error) {
+            if (error instanceof Error && error.message.includes('ENOENT')) {
+                console.log('[SyncFull] Arquivo de metadata não encontrado, criando novo');
+                return {};
+            }
+            console.warn('[SyncFull] Erro ao carregar metadata:', error);
+            return {};
+        }
+    }
+
+    /**
+     * Salva metadata de sincronização no arquivo sync-metadata.json
+     */
+    async saveSyncMetadata(metadata: SyncMetadata): Promise<void> {
+        if (!this.destinationPath) {
+            throw new Error('Caminho de destino não configurado');
+        }
+
+        const metadataPath = path.join(this.destinationPath, 'sync-metadata.json');
+
+        try {
+            const content = JSON.stringify(metadata, null, 2);
+            await fs.writeFile(metadataPath, content, 'utf-8');
+            console.log(`[SyncFull] Metadata salvo: ${Object.keys(metadata).length} arquivos`);
+        } catch (error) {
+            throw new Error(`Falha ao salvar metadata: ${error instanceof Error ? error.message : 'Erro desconhecido'}`);
+        }
+    }
+
+    /**
+     * Verifica se um arquivo foi modificado desde a última sincronização
+     */
+    async isFileModified(filePath: string, currentHash: string, currentSize: number): Promise<boolean> {
+        const metadata = await this.loadSyncMetadata();
+        const fileMetadata = metadata[filePath];
+
+        if (!fileMetadata) {
+            console.log(`[SyncFull] Arquivo não encontrado no metadata: ${filePath}`);
+            return true; // Arquivo novo, precisa sincronizar
+        }
+
+        const isModified = fileMetadata.hash !== currentHash || fileMetadata.size !== currentSize;
+        console.log(`[SyncFull] Arquivo modificado? ${filePath}: ${isModified}`);
+        return isModified;
+    }
+
+    /**
+     * Atualiza metadata de sincronização para um arquivo
+     */
+    async updateFileMetadata(filePath: string, hash: string, size: number): Promise<void> {
+        const metadata = await this.loadSyncMetadata();
+
+        metadata[filePath] = {
+            hash,
+            lastSync: Date.now(),
+            size
+        };
+
+        await this.saveSyncMetadata(metadata);
+        console.log(`[SyncFull] Metadata atualizado: ${filePath}`);
+    }
+
+    /**
+     * Remove arquivo do metadata de sincronização
+     */
+    async removeFileMetadata(filePath: string): Promise<void> {
+        const metadata = await this.loadSyncMetadata();
+
+        if (metadata[filePath]) {
+            delete metadata[filePath];
+            await this.saveSyncMetadata(metadata);
+            console.log(`[SyncFull] Metadata removido: ${filePath}`);
+        }
     }
 }
