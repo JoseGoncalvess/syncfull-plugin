@@ -3,9 +3,9 @@
 	"name": "SyncFull",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Plugin de sincronização local completa para arquivos de todos os tipos.",
+	"description": "Plugin de sincronização local completa para arquivos de todos os tipos com cofre base compartilhado.",
 	"author": "SyncFull Team",
 	"authorUrl": "",
 	"fundingUrl": "",
-	"isDesktopOnly": true
+	"isDesktopOnly": false
 }

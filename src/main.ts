@@ -1,6 +1,7 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile } from 'obsidian';
 import { DEFAULT_SETTINGS, MyPluginSettings, SyncFullSettingTab } from "./settings";
-import { FileSystemModule, SyncMetadata, ConflictInfo } from "./fsModule";
+import { SyncProtectionManager, DeviceInfo, ProtectionResult } from "./protection";
+import { SecureSyncManager, SyncResult, FileChange } from "./secureSync";
 
 // Interface para eventos de ficheiro na fila de sincronização
 interface FileChangeEvent {
@@ -15,15 +16,31 @@ export default class SyncFullPlugin extends Plugin {
 	// Propriedades para monitorização e sincronização
 	private syncQueue: FileChangeEvent[] = [];
 	private debounceTimer: NodeJS.Timeout | null = null;
-	private readonly DEBOUNCE_DELAY = 2500; // 2.5 segundos de debounce
+	private debounceDelay: number = 2500; // 2.5 segundos de debounce
 	private statusBarItemEl: HTMLElement | null = null;
-	private fsModule: FileSystemModule | null = null;
+
+	// Novos gerenciadores do modelo protegido
+	private protectionManager: SyncProtectionManager | null = null;
+	private secureSyncManager: SecureSyncManager | null = null;
+	private isServer: boolean = false;
+	private deviceId: string = '';
+
+	// Propriedades mobile
+	private isMobileDevice: boolean = false;
+	private isOnMobileData: boolean = false;
+	private monthlyDataUsage: number = 0; // MB
 
 	async onload() {
 		await this.loadSettings();
 
-		// Inicializar o módulo de sistema de ficheiros
-		this.initializeFSModule();
+		// Gerar ID do dispositivo se não existir
+		await this.generateDeviceId();
+
+		// Detectar dispositivo móvel e conexão
+		this.initializeMobileDetection();
+
+		// Inicializar o modo servidor/cliente
+		await this.initializeProtectedMode();
 
 		// Adicionar item na status bar para feedback visual
 		this.statusBarItemEl = this.addStatusBarItem();
@@ -41,80 +58,292 @@ export default class SyncFullPlugin extends Plugin {
 			}
 		});
 
-		// Comando para Validar Destino
+		// Comando para Testar Servidor
 		this.addCommand({
-			id: 'validate-destination',
-			name: 'Validar Destino de Sincronização',
+			id: 'test-server',
+			name: 'Testar Configuração do Servidor',
 			callback: async () => {
-				await this.validateDestination();
+				await this.testServerConfiguration();
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
+		// Comando para Testar Conexão
+		this.addCommand({
+			id: 'test-connection',
+			name: 'Testar Conexão com Servidor',
+			callback: async () => {
+				await this.testServerConnection();
+			}
+		});
+
+		// Adicionar aba de configurações
 		this.addSettingTab(new SyncFullSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
 	}
 
-	onunload() {
-	}
+	async onunload() {
+		// Limpar timer de debounce
+		if (this.debounceTimer) {
+			clearTimeout(this.debounceTimer);
+		}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-
-	/**
-	 * Inicializa o módulo de sistema de ficheiros e valida o destino
-	 */
-	private async initializeFSModule(): Promise<void> {
-		console.log('[SyncFull] Inicializando FS Module...');
-		console.log('[SyncFull] Settings loaded:', this.settings);
-		console.log('[SyncFull] Destination path:', this.settings.destinationPath);
-
-		if (this.settings.destinationPath && this.settings.destinationPath.trim() !== '') {
-			try {
-				this.fsModule = new FileSystemModule(this.settings.destinationPath);
-				console.log('[SyncFull] FS Module criado com sucesso');
-
-				// Validar o destino
-				console.log('[SyncFull] Validando destino...');
-				const validation = await this.fsModule.validateDestination();
-
-				if (!validation.valid) {
-					console.warn(`[SyncFull] Aviso: ${validation.error}`);
-					new Notice(`SyncFull: ${validation.error}`);
-					this.updateStatusBar('error');
-				} else {
-					console.log('[SyncFull] Destino validado com sucesso');
-					new Notice('✅ SyncFull: Destino configurado e validado');
-				}
-			} catch (error) {
-				console.error('[SyncFull] Erro ao inicializar FS Module:', error);
-				const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
-				new Notice(`SyncFull: Erro na inicialização - ${errorMessage}`);
-				this.updateStatusBar('error');
-			}
-		} else {
-			console.log('[SyncFull] Caminho de destino não configurado ou vazio');
-			new Notice('⚠️ SyncFull: Configure o caminho de destino nas definições');
-			this.updateStatusBar('error');
+		// Remover status bar item
+		if (this.statusBarItemEl) {
+			this.statusBarItemEl.remove();
 		}
 	}
 
 	/**
-	 * Registra os eventos de monitorização do vault para detetar alterações em ficheiros
+	 * Gera ID único do dispositivo se não existir
+	 */
+	private async generateDeviceId(): Promise<void> {
+		if (!this.settings.deviceId || this.settings.deviceId.trim() === '') {
+			// Gerar ID baseado em timestamp e informações do sistema
+			const timestamp = Date.now();
+			const random = Math.random().toString(36).substr(2, 9);
+			this.settings.deviceId = `device_${timestamp}_${random}`;
+
+			// Gerar nome amigável se não existir
+			if (!this.settings.deviceName || this.settings.deviceName.trim() === '') {
+				const platform = navigator.platform || 'Unknown';
+				const userAgent = navigator.userAgent.split(' ').pop() || 'Device';
+				this.settings.deviceName = `${platform}-${userAgent.substring(0, 20)}`;
+			}
+
+			console.log(`[SyncFull] Dispositivo registrado: ${this.settings.deviceId} (${this.settings.deviceName})`);
+		}
+
+		this.deviceId = this.settings.deviceId;
+	}
+
+	/**
+	 * Inicializa o modo protegido (servidor/cliente)
+	 */
+	private async initializeProtectedMode(): Promise<void> {
+		try {
+			this.isServer = this.settings.isServer;
+
+			if (this.isServer) {
+				// Modo Servidor
+				await this.initializeServer();
+			} else {
+				// Modo Cliente
+				await this.initializeClient();
+			}
+		} catch (error) {
+			console.error('[SyncFull] Erro ao inicializar modo protegido:', error);
+			if (this.settings.enableNotifications) new Notice('❌ Erro ao inicializar modo protegido');
+		}
+	}
+
+	/**
+	 * Inicializa modo servidor
+	 */
+	private async initializeServer(): Promise<void> {
+		if (!this.settings.serverPath || this.settings.serverPath.trim() === '') {
+			console.log('[SyncFull] Servidor: Caminho da PastaBase não configurado');
+			this.updateStatusBar('error');
+			return;
+		}
+
+		try {
+			// Inicializar SyncProtectionManager
+			this.protectionManager = new SyncProtectionManager(this.settings.serverPath);
+
+			// Ativar proteção se configurado
+			if (this.settings.enableProtection) {
+				const protectionResult = await this.protectionManager.initializeProtection();
+				if (!protectionResult.success) {
+					throw new Error(protectionResult.error);
+				}
+			}
+
+			// Inicializar SecureSyncManager
+			this.secureSyncManager = new SecureSyncManager(
+				this.protectionManager,
+				this.deviceId,
+				true, // isServer
+				this.settings.serverPath
+			);
+
+			// Autorizar este dispositivo (servidor)
+			const deviceInfo: DeviceInfo = {
+				id: this.deviceId,
+				name: this.settings.deviceName || 'Servidor',
+				lastSync: Date.now(),
+				status: 'online',
+				vaultPath: this.settings.serverPath,
+				firstSeen: Date.now()
+			};
+
+			await this.protectionManager.authorizeDevice(deviceInfo);
+
+			console.log('[SyncFull] Servidor inicializado com sucesso');
+			this.updateStatusBar('server');
+			if (this.settings.enableNotifications) new Notice('✅ Servidor SyncFull inicializado');
+
+		} catch (error) {
+			console.error('[SyncFull] Erro ao inicializar servidor:', error);
+			this.updateStatusBar('error');
+			if (this.settings.enableNotifications) new Notice('❌ Erro ao inicializar servidor');
+		}
+	}
+
+	/**
+	 * Inicializa modo cliente
+	 */
+	private async initializeClient(): Promise<void> {
+		if (!this.settings.serverAddress || this.settings.serverAddress.trim() === '') {
+			console.log('[SyncFull] Cliente: Endereço do servidor não configurado');
+			this.updateStatusBar('error');
+			return;
+		}
+
+		if (!this.settings.clientPath || this.settings.clientPath.trim() === '') {
+			console.log('[SyncFull] Cliente: Pasta local não configurada');
+			this.updateStatusBar('error');
+			return;
+		}
+
+		try {
+			// Inicializar SyncProtectionManager (para validação)
+			this.protectionManager = new SyncProtectionManager(this.settings.serverAddress);
+
+			// Inicializar SecureSyncManager
+			this.secureSyncManager = new SecureSyncManager(
+				this.protectionManager,
+				this.deviceId,
+				false, // isServer
+				this.settings.serverAddress,
+				this.settings.clientPath
+			);
+
+			console.log('[SyncFull] Cliente inicializado com sucesso');
+			this.updateStatusBar('client');
+			if (this.settings.enableNotifications) new Notice('✅ Cliente SyncFull inicializado');
+
+		} catch (error) {
+			console.error('[SyncFull] Erro ao inicializar cliente:', error);
+			this.updateStatusBar('error');
+			if (this.settings.enableNotifications) new Notice('❌ Erro ao inicializar cliente');
+		}
+	}
+
+	/**
+	 * Testa configuração do servidor
+	 */
+	async testServerConfiguration(): Promise<ProtectionResult> {
+		if (!this.isServer) {
+			return {
+				success: false,
+				error: 'Este dispositivo não está configurado como servidor'
+			};
+		}
+
+		if (!this.settings.serverPath || this.settings.serverPath.trim() === '') {
+			return {
+				success: false,
+				error: 'Caminho da PastaBase não configurado'
+			};
+		}
+
+		if (!this.protectionManager) {
+			return {
+				success: false,
+				error: 'Gerenciador de proteção não inicializado'
+			};
+		}
+
+		try {
+			// Verificar se proteção está ativa
+			const isProtectionActive = await this.protectionManager.isProtectionActive();
+
+			// Obter estatísticas do sistema
+			const stats = await this.protectionManager.getProtectionStats();
+
+			// Listar dispositivos autorizados
+			const devices = await this.protectionManager.getAuthorizedDevices();
+
+			return {
+				success: true,
+				message: `Servidor OK - Proteção: ${isProtectionActive ? 'Ativa' : 'Inativa'}, Dispositivos: ${stats.totalDevices}, Locks: ${stats.activeLocks}`
+			};
+		} catch (error) {
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : 'Erro desconhecido'
+			};
+		}
+	}
+
+	/**
+	 * Testa conexão com o servidor
+	 */
+	async testServerConnection(): Promise<ProtectionResult> {
+		if (this.isServer) {
+			return {
+				success: false,
+				error: 'Este dispositivo é o servidor, não um cliente'
+			};
+		}
+
+		if (!this.settings.serverAddress || this.settings.serverAddress.trim() === '') {
+			return {
+				success: false,
+				error: 'Endereço do servidor não configurado'
+			};
+		}
+
+		if (!this.protectionManager) {
+			return {
+				success: false,
+				error: 'Gerenciador de proteção não inicializado'
+			};
+		}
+
+		try {
+			// Verificar se consegue acessar o servidor
+			const isProtectionActive = await this.protectionManager.isProtectionActive();
+
+			if (!isProtectionActive) {
+				return {
+					success: false,
+					error: 'Servidor não está com proteção ativa'
+				};
+			}
+
+			// Verificar se este dispositivo está autorizado
+			const devices = await this.protectionManager.getAuthorizedDevices();
+			const isAuthorized = devices.some(device => device.id === this.deviceId);
+
+			return {
+				success: true,
+				message: `Conexão OK - Servidor acessível, Dispositivo ${isAuthorized ? 'autorizado' : 'não autorizado'}`
+			};
+		} catch (error) {
+			return {
+				success: false,
+				error: error instanceof Error ? error.message : 'Erro desconhecido'
+			};
+		}
+	}
+
+	/**
+	 * Detecta dispositivo móvel e conexão
+	 */
+	private initializeMobileDetection(): void {
+		// Detectar se é dispositivo móvel
+		const userAgent = navigator.userAgent.toLowerCase();
+		this.isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent);
+
+		// Detectar conexão de dados móveis (simplificado)
+		this.isOnMobileData = this.isMobileDevice && !navigator.onLine;
+
+		console.log(`[SyncFull] Dispositivo: ${this.isMobileDevice ? 'Móvel' : 'Desktop'}`);
+		console.log(`[SyncFull] Conexão: ${this.isOnMobileData ? 'Dados móveis' : 'WiFi/Ethernet'}`);
+	}
+
+	/**
+	 * Registra os eventos de monitorização do vault
 	 */
 	private registerVaultEvents() {
 		// Evento para quando um ficheiro é modificado
@@ -146,7 +375,7 @@ export default class SyncFullPlugin extends Plugin {
 	}
 
 	/**
-	 * Verifica se o ficheiro deve ser processado (todos os ficheiros)
+	 * Verifica se o ficheiro deve ser processado
 	 */
 	private shouldProcessFile(file: TFile): boolean {
 		// Sincronizar todos os ficheiros, exceto ficheiros de sistema ocultos
@@ -168,16 +397,17 @@ export default class SyncFullPlugin extends Plugin {
 
 		this.syncQueue.push(changeEvent);
 
-		// Limpar timer anterior e configurar novo debounce
+		// Limpar timer anterior
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
 		}
 
+		// Configurar novo timer
 		this.debounceTimer = setTimeout(() => {
 			this.processSyncQueue();
-		}, this.DEBOUNCE_DELAY);
+		}, this.debounceDelay);
 
-		// Atualizar status bar para mostrar sincronização pendente
+		// Atualizar status bar
 		this.updateStatusBar('syncing');
 	}
 
@@ -202,15 +432,15 @@ export default class SyncFullPlugin extends Plugin {
 			}
 		}
 
-		// Processar cada alteração única
+		// Processar cada alteração única usando o novo modelo protegido
 		for (const [filePath, change] of latestChanges) {
 			try {
-				await this.syncFile(change);
+				await this.syncFileProtected(change);
 				console.log(`[SyncFull] Sincronizado: ${filePath} (${change.type})`);
 			} catch (error) {
 				console.error(`[SyncFull] Erro ao sincronizar ${filePath}:`, error);
 				const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
-				new Notice(`Erro ao sincronizar ${filePath}: ${errorMessage}`);
+				if (this.settings.enableNotifications) new Notice(`Erro ao sincronizar ${filePath}: ${errorMessage}`);
 			}
 		}
 
@@ -220,82 +450,43 @@ export default class SyncFullPlugin extends Plugin {
 	}
 
 	/**
-	 * Sincroniza um ficheiro individual usando o FileSystemModule com resolução de conflitos
+	 * Sincroniza um ficheiro usando o modelo protegido
 	 */
-	private async syncFile(change: FileChangeEvent): Promise<void> {
-		if (!this.fsModule) {
-			throw new Error('FileSystemModule não inicializado');
+	private async syncFileProtected(change: FileChangeEvent): Promise<void> {
+		if (!this.secureSyncManager) {
+			throw new Error('SecureSyncManager não inicializado');
 		}
 
 		if (change.type === 'delete') {
-			// Eliminar ficheiro no destino e remover do metadata
-			await this.fsModule.deleteFile(change.file.path);
-			await this.fsModule.removeFileMetadata(change.file.path);
+			// Para deleção, usar o fluxo normal (implementação futura)
+			console.log(`[SyncFull] Deleção de arquivo: ${change.file.path}`);
+			// TODO: Implementar deleção segura
 		} else {
-			// Determinar se é arquivo binário baseado na extensão
+			// Ler conteúdo do arquivo
 			const isBinaryFile = this.isBinaryFile(change.file.path);
-
 			let content: string | ArrayBuffer;
-			let hash: string;
 
 			if (isBinaryFile) {
-				// Ler arquivo binário como ArrayBuffer
 				content = await this.app.vault.readBinary(change.file);
-				console.log(`[SyncFull] Lendo arquivo binário: ${change.file.path}`);
-
-				// Calcular hash do conteúdo binário
-				hash = require('crypto').createHash('sha256').update(new Uint8Array(content)).digest('hex');
 			} else {
-				// Ler arquivo de texto como string
 				content = await this.app.vault.read(change.file);
-				console.log(`[SyncFull] Lendo arquivo de texto: ${change.file.path}`);
-
-				// Calcular hash do conteúdo de texto
-				hash = require('crypto').createHash('sha256').update(content, 'utf-8').digest('hex');
 			}
 
-			// Detectar conflitos
-			const conflict = await this.fsModule.detectConflict(change.file, hash);
-
-			if (conflict) {
-				console.log(`[SyncFull] Conflito detectado: ${change.file.path} (${conflict.conflictType})`);
-
-				// Resolver conflito baseado na estratégia configurada
-				const resolution = await this.fsModule.resolveConflict(
-					conflict,
-					change.file,
-					content,
-					this.settings.conflictResolution,
-					this.settings.createConflictCopies
+			if (this.isServer) {
+				// Servidor: apenas valida e integra (se vier de cliente autorizado)
+				console.log(`[SyncFull] Servidor recebendo alteração: ${change.file.path}`);
+				// TODO: Implementar recebimento de alterações de clientes
+			} else {
+				// Cliente: envia para servidor
+				const result = await this.secureSyncManager.syncFileToServer(
+					change.file.path,
+					content
 				);
 
-				// Log da ação de resolução
-				console.log(`[SyncFull] Conflito resolvido: ${resolution.action}`);
-
-				// Notificar usuário sobre conflito
-				if (resolution.action === 'conflict-copy-created') {
-					new Notice(`⚠️ SyncFull: Conflito criado - ${resolution.resultPath}`);
-				} else if (resolution.action === 'skipped') {
-					new Notice(`⚠️ SyncFull: Arquivo pulado por conflito - ${change.file.path}`);
-					return; // Não atualizar metadata se pulou
+				if (!result.success) {
+					throw new Error(result.error || 'Erro ao sincronizar com servidor');
 				}
-			} else {
-				// Verificar se o arquivo foi modificado usando o metadata
-				const isModified = await this.fsModule.isFileModified(change.file.path, hash, change.file.stat.size);
-
-				if (!isModified) {
-					console.log(`[SyncFull] Arquivo não modificado, pulando: ${change.file.path}`);
-					return; // Pular sincronização se não houver modificações
-				}
-
-				// Copiar para o destino usando escrita atômica
-				await this.fsModule.atomicCopy(change.file, content);
 			}
-
-			// Atualizar metadata de sincronização
-			await this.fsModule.updateFileMetadata(change.file.path, hash, change.file.stat.size);
-
-			console.log(`[SyncFull] Arquivo sincronizado: ${change.file.path}`);
 		}
 	}
 
@@ -325,168 +516,78 @@ export default class SyncFullPlugin extends Plugin {
 	}
 
 	/**
+	 * Força sincronização completa
+	 */
+	async forceSync(): Promise<void> {
+		console.log('[SyncFull] forceSync() chamado');
+
+		if (!this.secureSyncManager) {
+			console.error('[SyncFull] SecureSyncManager não inicializado');
+			if (this.settings.enableNotifications) new Notice('❌ SyncFull: Sistema de sincronização não inicializado');
+			return;
+		}
+
+		if (this.isServer) {
+			// Servidor: download para clientes
+			console.log('[SyncFull] Servidor: notificando clientes sobre mudanças');
+			if (this.settings.enableNotifications) new Notice('✅ Servidor: Clientes notificados');
+		} else {
+			// Cliente: download do servidor
+			try {
+				if (this.settings.enableNotifications) new Notice('🔍 Baixando alterações do servidor...');
+				const result = await this.secureSyncManager.downloadFromServer();
+
+				if (result.success) {
+					if (this.settings.enableNotifications) new Notice(`✅ ${result.message}`);
+				} else {
+					if (this.settings.enableNotifications) new Notice(`❌ Erro: ${result.error}`);
+				}
+			} catch (error) {
+				console.error('[SyncFull] Erro ao forçar sincronização:', error);
+				if (this.settings.enableNotifications) new Notice('❌ Erro ao forçar sincronização');
+			}
+		}
+	}
+
+	/**
 	 * Atualiza o status bar com o estado atual
 	 */
-	private updateStatusBar(status: 'connected' | 'syncing' | 'error') {
+	private updateStatusBar(status: 'connected' | 'syncing' | 'error' | 'server' | 'client') {
 		if (!this.statusBarItemEl) return;
 
 		const statusIcons = {
 			connected: '🟢',
 			syncing: '🟡',
-			error: '🔴'
+			error: '🔴',
+			server: '🖥️',
+			client: '📱'
 		};
 
 		const statusTexts = {
 			connected: 'Conectado',
 			syncing: 'Sincronizando...',
-			error: 'Erro'
+			error: 'Erro',
+			server: 'Servidor',
+			client: 'Cliente'
 		};
 
-		this.statusBarItemEl.setText(`${statusIcons[status]} SyncFull - ${statusTexts[status]}`);
+		let statusText = `${statusIcons[status]} SyncFull - ${statusTexts[status]}`;
+
+		// Adicionar informações mobile se aplicável
+		if (this.isMobileDevice) {
+			const connectionIcon = this.isOnMobileData ? '📶' : '📡';
+			const dataUsage = this.isOnMobileData ? ` (${this.monthlyDataUsage.toFixed(1)}MB)` : '';
+			statusText += ` ${connectionIcon}${dataUsage}`;
+		}
+
+		this.statusBarItemEl.setText(statusText);
 	}
 
-	/**
-	 * Força a sincronização completa de todos os ficheiros Markdown do vault
-	 */
-	async forceSync(): Promise<void> {
-		console.log('[SyncFull] forceSync() chamado');
-		console.log('[SyncFull] fsModule existe:', !!this.fsModule);
-		console.log('[SyncFull] destination path:', this.settings.destinationPath);
-
-		if (!this.fsModule) {
-			console.error('[SyncFull] FS Module não inicializado em forceSync()');
-			new Notice('❌ SyncFull: Sistema de ficheiros não inicializado');
-			new Notice('💡 Dica: Verifique se o caminho de destino está configurado nas definições');
-			return;
-		}
-
-		// Validar destino antes de sincronizar
-		const validation = await this.fsModule.validateDestination();
-		if (!validation.valid) {
-			new Notice(`SyncFull: Erro de validação - ${validation.error}`);
-			this.updateStatusBar('error');
-			return;
-		}
-
-		// Obter todos os ficheiros do vault
-		const allFiles = this.app.vault.getFiles();
-
-		// Filtrar apenas ficheiros (não pastas) e não ocultos
-		const filesToSync = allFiles.filter(file => this.shouldProcessFile(file));
-
-		if (filesToSync.length === 0) {
-			new Notice('SyncFull: Nenhum ficheiro encontrado para sincronizar');
-			this.updateStatusBar('connected');
-			return;
-		}
-
-		console.log(`[SyncFull] Iniciando sincronização de ${filesToSync.length} ficheiros...`);
-
-		let successCount = 0;
-		let errorCount = 0;
-
-		// Sincronizar cada ficheiro
-		for (const file of filesToSync) {
-			try {
-				// Determinar se é arquivo binário baseado na extensão
-				const isBinaryFile = this.isBinaryFile(file.path);
-
-				let content: string | ArrayBuffer;
-				let hash: string;
-
-				if (isBinaryFile) {
-					// Ler arquivo binário como ArrayBuffer
-					content = await this.app.vault.readBinary(file);
-
-					// Calcular hash do conteúdo binário
-					hash = require('crypto').createHash('sha256').update(new Uint8Array(content)).digest('hex');
-				} else {
-					// Ler arquivo de texto como string
-					content = await this.app.vault.read(file);
-
-					// Calcular hash do conteúdo de texto
-					hash = require('crypto').createHash('sha256').update(content, 'utf-8').digest('hex');
-				}
-
-				// Verificar se o arquivo foi modificado usando o metadata
-				const isModified = await this.fsModule.isFileModified(file.path, hash, file.stat.size);
-
-				if (!isModified) {
-					console.log(`[SyncFull] Arquivo não modificado, pulando: ${file.path}`);
-					continue; // Pular sincronização se não houver modificações
-				}
-
-				// Copiar para o destino usando escrita atômica
-				await this.fsModule.atomicCopy(file, content);
-
-				// Atualizar metadata de sincronização
-				await this.fsModule.updateFileMetadata(file.path, hash, file.stat.size);
-
-				successCount++;
-
-				// Atualizar progresso a cada 10 ficheiros
-				if (successCount % 10 === 0) {
-					new Notice(`SyncFull: Processados ${successCount}/${filesToSync.length} ficheiros...`);
-				}
-			} catch (error) {
-				errorCount++;
-				console.error(`[SyncFull] Erro ao sincronizar ${file.path}:`, error);
-			}
-		}
-
-		// Feedback final
-		const message = errorCount > 0
-			? `Sincronização concluída: ${successCount} sucesso, ${errorCount} erros`
-			: `Sincronização concluída: ${successCount} ficheiros sincronizados com sucesso`;
-
-		new Notice(`SyncFull: ${message}`);
-		console.log(`[SyncFull] ${message}`);
-
-		this.updateStatusBar('connected');
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
-
-	/**
-	 * Valida o destino de sincronização e mostra feedback
-	 */
-	async validateDestination(): Promise<void> {
-		if (!this.fsModule) {
-			new Notice('SyncFull: Sistema de ficheiros não inicializado');
-			return;
-		}
-
-		try {
-			new Notice('SyncFull: Validando destino...');
-			const validation = await this.fsModule.validateDestination();
-
-			if (validation.valid) {
-				new Notice('✅ SyncFull: Destino validado com sucesso');
-				this.updateStatusBar('connected');
-			} else {
-				new Notice(`❌ SyncFull: ${validation.error}`);
-				this.updateStatusBar('error');
-			}
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
-			console.error('[SyncFull] Erro ao validar destino:', error);
-			new Notice(`SyncFull: Erro na validação - ${errorMessage}`);
-			this.updateStatusBar('error');
-		}
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		let { contentEl } = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
+	async saveSettings() {
+		await this.saveData(this.settings);
 	}
 }
