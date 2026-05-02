@@ -104,30 +104,6 @@ export class FileSystemModule {
         }
     }
 
-    /**
-     * Verifica se um arquivo é binário baseado na extensão
-     */
-    private isBinaryFile(filePath: string): boolean {
-        const binaryExtensions = [
-            // Imagens
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico',
-            // Áudio
-            '.mp3', '.wav', '.ogg', '.flac', '.aac',
-            // Vídeo
-            '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv',
-            // Documentos
-            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-            // Arquivos compactados
-            '.zip', '.rar', '.7z', '.tar', '.gz',
-            // Executáveis e binários
-            '.exe', '.dll', '.so', '.dylib',
-            // Outros binários comuns
-            '.bin', '.dat', '.db', '.sqlite'
-        ];
-
-        const ext = path.extname(filePath).toLowerCase();
-        return binaryExtensions.includes(ext);
-    }
 
     /**
      * Elimina um ficheiro na pasta de destino
@@ -454,7 +430,7 @@ export class FileSystemModule {
                 const isSourceNewer = conflict.sourceModified > conflict.destModified;
 
                 if (isSourceNewer) {
-                    await this.copyFile(sourceFile, content);
+                    await this.atomicCopy(sourceFile, content);
                     return { action: 'synced-source', resultPath: conflict.filePath };
                 } else {
                     return { action: 'skipped-dest-newer' };
@@ -474,7 +450,7 @@ export class FileSystemModule {
                         path: conflictPath
                     } as TFile;
 
-                    await this.copyFile(conflictFile, content);
+                    await this.atomicCopy(conflictFile, content);
                     return { action: 'conflict-copy-created', resultPath: conflictPath };
                 } else {
                     // Fallback para last-writes-wins
@@ -500,5 +476,85 @@ export class FileSystemModule {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
         return path.join(dir, `${base} (conflito ${timestamp})${ext}`);
+    }
+
+    /**
+     * Implementa escrita atômica para evitar corrupção de arquivos
+     */
+    async atomicCopy(sourceFile: TFile, content: string | ArrayBuffer): Promise<void> {
+        if (!this.destinationPath) {
+            throw new Error('Caminho de destino não configurado');
+        }
+
+        const destPath = path.join(this.destinationPath, sourceFile.path);
+        const tempPath = `${destPath}.tmp.${Date.now()}.${Math.random().toString(36).substr(2, 9)}`;
+
+        try {
+            console.log(`[SyncFull] Iniciando escrita atômica: ${sourceFile.path}`);
+
+            // Criar diretório se não existir
+            const destDir = path.dirname(destPath);
+            await this.createDirectory(destDir);
+
+            // Escrever para arquivo temporário
+            const isBinaryFile = this.isBinaryFile(sourceFile.path);
+
+            if (isBinaryFile && content instanceof ArrayBuffer) {
+                // Escrever arquivo binário como buffer
+                await fs.writeFile(tempPath, new Uint8Array(content));
+            } else if (!isBinaryFile && typeof content === 'string') {
+                // Escrever arquivo de texto como UTF-8
+                await fs.writeFile(tempPath, content, 'utf-8');
+            } else {
+                // Fallback: converter conforme necessário
+                const fileContent = typeof content === 'string'
+                    ? Buffer.from(content, 'utf-8')
+                    : new Uint8Array(content);
+                await fs.writeFile(tempPath, fileContent);
+            }
+
+            console.log(`[SyncFull] Arquivo temporário criado: ${tempPath}`);
+
+            // Mover atomicamente para o destino final
+            await fs.rename(tempPath, destPath);
+
+            console.log(`[SyncFull] Escrita atômica concluída: ${sourceFile.path}`);
+
+        } catch (error) {
+            // Limpar arquivo temporário em caso de erro
+            try {
+                await fs.unlink(tempPath);
+                console.log(`[SyncFull] Arquivo temporário removido: ${tempPath}`);
+            } catch (cleanupError) {
+                console.warn(`[SyncFull] Erro ao limpar arquivo temporário ${tempPath}:`, cleanupError);
+            }
+
+            throw new Error(`Falha na escrita atômica do arquivo ${sourceFile.path}: ${error instanceof Error ? error.message : 'Erro desconhecido'}`);
+        }
+    }
+
+    /**
+     * Verifica se um arquivo é binário baseado na extensão
+     */
+    private isBinaryFile(filePath: string): boolean {
+        const binaryExtensions = [
+            // Imagens
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico',
+            // Áudio
+            '.mp3', '.wav', '.ogg', '.flac', '.aac',
+            // Vídeo
+            '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv',
+            // Documentos
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            // Arquivos compactados
+            '.zip', '.rar', '.7z', '.tar', '.gz',
+            // Executáveis e binários
+            '.exe', '.dll', '.so', '.dylib',
+            // Outros binários comuns
+            '.bin', '.dat', '.db', '.sqlite'
+        ];
+
+        const ext = filePath.split('.').pop()?.toLowerCase();
+        return ext ? binaryExtensions.includes('.' + ext) : false;
     }
 }

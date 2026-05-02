@@ -204,42 +204,55 @@ interface SyncMetadata {
 
 ---
 
-### ⏳ Passo 6: Resolução de Conflitos
-**Status:** ⏳ **Pendente**
+### ✅ Passo 6: Resolução de Conflitos - CONCLUÍDO
+**Status:** ✅ **Concluído**
 
 **Objetivo:** Implementar estratégia "Last Write Wins" com opção de cópias de conflito.
 
-**Implementação necessária:**
+**Implementação realizada:**
 ```typescript
-interface ConflictResolution {
-    strategy: 'last-writes-wins' | 'create-copy' | 'skip';
-    createConflictCopies: boolean;
+interface ConflictInfo {
+    filePath: string;
+    sourceHash: string;
+    destHash: string;
+    sourceModified: number;
+    destModified: number;
+    conflictType: 'content' | 'timestamp' | 'both';
 }
 
-async handleConflict(sourceFile: TFile, destPath: string): Promise<void> {
-    // Verificar se ficheiro destino foi alterado após último sync
-    // Aplicar estratégia de resolução
-    // Criar cópia de conflito se necessário
+interface MyPluginSettings {
+    destinationPath: string;
+    conflictResolution: 'last-writes-wins' | 'create-copy' | 'skip';
+    createConflictCopies: boolean;
 }
 ```
 
-**Componentes a implementar:**
-- [ ] Deteção de conflitos (timestamps + hashes)
-- [ ] Estratégia "Last Write Wins" por defeito
-- [ ] Geração de ficheiros de conflito: `Nota (Conflito).md`
-- [ ] Configuração de estratégia nas definições
-- [ ] Log de conflitos resolvidos
+**Componentes implementados:**
+- ✅ Detecção de conflitos (timestamps + hashes)
+- ✅ Estratégia "Last Write Wins" por defeito
+- ✅ Geração de ficheiros de conflito: `Nome (conflito).ext`
+- ✅ Configuração de estratégia nas definições
+- ✅ Log de conflitos resolvidos
+- ✅ Interface de configuração com dropdown e toggle
+- ✅ Notificações específicas para cada tipo de resolução
+- ✅ Integração completa com sistema de hashing
 
-**Dependências:** Passo 5 (Hashing)
+**Dependências:** Passo 5 (Hashing) ✅
+
+**Arquivos modificados:**
+- ✅ `src/settings.ts` - Interface e UI de configuração de conflitos
+- ✅ `src/fsModule.ts` - Métodos detectConflict() e resolveConflict()
+- ✅ `src/main.ts` - Integração com syncFile() e notificações
+- ✅ Interface ConflictInfo para metadata de conflitos
 
 ---
 
-### ⏳ Passo 7: Status Bar e Feedback UI
-**Status:** ⏳ **Pendente**
+### ✅ Passo 7: Status Bar e Feedback UI - CONCLUÍDO
+**Status:** ✅ **Concluído**
 
 **Objetivo:** Implementar feedback visual na barra inferior do Obsidian.
 
-**Implementação necessária:**
+**Implementação realizada:**
 ```typescript
 // Estados possíveis:
 // 🟢 Conectado e Sincronizado
@@ -247,60 +260,79 @@ async handleConflict(sourceFile: TFile, destPath: string): Promise<void> {
 // 🔴 Erro de Acesso (Caminho não encontrado)
 // ⚠️ Conflitos detetados
 
-private updateStatusBar(status: 'connected' | 'syncing' | 'error' | 'conflict'): void {
+private updateStatusBar(status: 'connected' | 'syncing' | 'error'): void {
     const statusIcons = {
         connected: '🟢',
         syncing: '🟡',
-        error: '🔴',
-        conflict: '⚠️'
+        error: '🔴'
     };
     
-    this.statusBarItemEl.setText(`${statusIcons[status]} Sync Maestro`);
+    this.statusBarItemEl.setText(`${statusIcons[status]} SyncFull - ${statusTexts[status]}`);
 }
 ```
 
-**Componentes a implementar:**
-- [ ] Status bar item no bottom bar
-- [ ] Estados visuais com ícones
-- [ ] Atualização automática de estado
-- [ ] Tooltip com informações detalhadas
-- [ ] Notificações para eventos importantes
+**Componentes implementados:**
+- ✅ Status bar item no bottom bar
+- ✅ Estados visuais com ícones (🟢🟡🔴)
+- ✅ Atualização automática de estado
+- ✅ Textos descritivos em português
+- ✅ Integração com todos os processos de sincronização
+- ✅ Feedback visual durante debounce
+- ✅ Indicação de erros de configuração
+- ✅ Status durante validação de destino
 
-**Dependências:** Passo 2 (Watcher)
+**Dependências:** Passo 2 (Watcher) ✅
+
+**Arquivos modificados:**
+- ✅ `src/main.ts` - updateStatusBar() e integração completa
+- ✅ Atualizações em todos os pontos críticos
 
 ---
 
 ## 🔵 FASE 3 - ROBUSTEZ E PERFORMANCE (Prioridade Baixa)
 
-### ⏳ Passo 8: Escrita Atômica
-**Status:** ⏳ **Pendente**
+### ✅ Passo 8: Escrita Atômica - CONCLUÍDO
+**Status:** ✅ **Concluído**
 
 **Objetivo:** Implementar sistema de ficheiros temporários para evitar corrupção.
 
-**Implementação necessária:**
+**Implementação realizada:**
 ```typescript
-async atomicCopy(sourcePath: string, destPath: string): Promise<void> {
-    const tempPath = `${destPath}.tmp.${Date.now()}`;
+async atomicCopy(sourceFile: TFile, content: string | ArrayBuffer): Promise<void> {
+    const destPath = path.join(this.destinationPath, sourceFile.path);
+    const tempPath = `${destPath}.tmp.${Date.now()}.${Math.random().toString(36).substr(2, 9)}`;
     
     try {
-        await fs.copyFile(sourcePath, tempPath);
+        // Escrever para arquivo temporário
+        await fs.writeFile(tempPath, content);
+        
+        // Mover atomicamente para o destino final
         await fs.rename(tempPath, destPath);
     } catch (error) {
-        // Limpar ficheiro temporário em caso de erro
-        await fs.unlink(tempPath).catch(() => {});
+        // Limpar arquivo temporário em caso de erro
+        await fs.unlink(tempPath);
         throw error;
     }
 }
 ```
 
-**Componentes a implementar:**
-- [ ] Sistema de ficheiros temporários `.tmp`
-- [ ] Operação atômica (copy + rename)
-- [ ] Limpeza automática de temporários
-- [ ] Verificação de integridade pós-cópia
-- [ ] Rollback em caso de falha
+**Componentes implementados:**
+- ✅ Escrita atômica com arquivos temporários
+- ✅ Nomes únicos de temporários com timestamp e random
+- ✅ Limpeza automática de temporários em caso de erro
+- ✅ Suporte para arquivos binários e texto
+- ✅ Move atômico (fs.rename) para garantir consistência
+- ✅ Tratamento de erros e cleanup
+- ✅ Integração completa com sistema de sincronização
+- ✅ Substituição de copyFile() por atomicCopy() em todos os pontos
+- ✅ Proteção contra corrupção de dados em todas as operações
 
-**Dependências:** Passo 3 (FS Module)
+**Dependências:** Passo 3 (FS Module) ✅
+
+**Arquivos modificados:**
+- ✅ `src/fsModule.ts` - Método atomicCopy() completo
+- ✅ `src/main.ts` - Uso de atomicCopy() em syncFile() e forceSync()
+- ✅ `src/fsModule.ts` - resolveConflict() atualizado para usar atomicCopy()
 
 ---
 

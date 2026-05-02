@@ -288,8 +288,8 @@ export default class SyncFullPlugin extends Plugin {
 					return; // Pular sincronização se não houver modificações
 				}
 
-				// Copiar para o destino
-				await this.fsModule.copyFile(change.file, content);
+				// Copiar para o destino usando escrita atômica
+				await this.fsModule.atomicCopy(change.file, content);
 			}
 
 			// Atualizar metadata de sincronização
@@ -416,8 +416,8 @@ export default class SyncFullPlugin extends Plugin {
 					continue; // Pular sincronização se não houver modificações
 				}
 
-				// Copiar para o destino
-				await this.fsModule.copyFile(file, content);
+				// Copiar para o destino usando escrita atômica
+				await this.fsModule.atomicCopy(file, content);
 
 				// Atualizar metadata de sincronização
 				await this.fsModule.updateFileMetadata(file.path, hash, file.stat.size);
