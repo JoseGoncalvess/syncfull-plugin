@@ -11,7 +11,20 @@ export interface SyncMetadata {
         hash: string;
         lastSync: number;
         size: number;
+        modifiedTime: number;
     };
+}
+
+/**
+ * Interface para detecção de conflitos
+ */
+export interface ConflictInfo {
+    filePath: string;
+    sourceHash: string;
+    destHash: string;
+    sourceModified: number;
+    destModified: number;
+    conflictType: 'content' | 'timestamp' | 'both';
 }
 
 /**
@@ -347,7 +360,8 @@ export class FileSystemModule {
         metadata[filePath] = {
             hash,
             lastSync: Date.now(),
-            size
+            size,
+            modifiedTime: Date.now()
         };
 
         await this.saveSyncMetadata(metadata);
@@ -365,5 +379,126 @@ export class FileSystemModule {
             await this.saveSyncMetadata(metadata);
             console.log(`[SyncFull] Metadata removido: ${filePath}`);
         }
+    }
+
+    /**
+     * Detecta conflitos entre arquivo fonte e destino
+     */
+    async detectConflict(sourceFile: TFile, sourceHash: string): Promise<ConflictInfo | null> {
+        if (!this.destinationPath) {
+            return null;
+        }
+
+        const destPath = path.join(this.destinationPath, sourceFile.path);
+
+        try {
+            // Verificar se arquivo existe no destino
+            const destExists = await this.fileExists(sourceFile.path);
+            if (!destExists) {
+                return null; // Sem conflito, arquivo novo
+            }
+
+            // Obter hash do arquivo destino
+            const destHash = await this.calculateFileHash(sourceFile.path);
+
+            // Obter estatísticas do arquivo destino
+            const destStats = await this.getFileStats(sourceFile.path);
+            if (!destStats) {
+                return null;
+            }
+
+            // Comparar hashes e timestamps
+            const sourceModified = sourceFile.stat.mtime;
+            const destModified = destStats.mtime;
+
+            // Determinar tipo de conflito
+            let conflictType: 'content' | 'timestamp' | 'both' = 'content';
+
+            if (sourceHash !== destHash) {
+                conflictType = 'content';
+            } else if (Math.abs(sourceModified - destModified) > 1000) {
+                conflictType = 'timestamp';
+            } else {
+                return null; // Sem conflito
+            }
+
+            return {
+                filePath: sourceFile.path,
+                sourceHash,
+                destHash,
+                sourceModified,
+                destModified,
+                conflictType
+            };
+        } catch (error) {
+            console.warn(`[SyncFull] Erro ao detectar conflito para ${sourceFile.path}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Resolve conflito baseado na estratégia configurada
+     */
+    async resolveConflict(
+        conflict: ConflictInfo,
+        sourceFile: TFile,
+        content: string | ArrayBuffer,
+        strategy: 'last-writes-wins' | 'create-copy' | 'skip',
+        createCopies: boolean
+    ): Promise<{ action: string; resultPath?: string }> {
+        console.log(`[SyncFull] Resolvendo conflito: ${conflict.filePath} (${strategy})`);
+
+        switch (strategy) {
+            case 'last-writes-wins':
+                // Última escrita vence - sempre usar o mais recente
+                const isSourceNewer = conflict.sourceModified > conflict.destModified;
+
+                if (isSourceNewer) {
+                    await this.copyFile(sourceFile, content);
+                    return { action: 'synced-source', resultPath: conflict.filePath };
+                } else {
+                    return { action: 'skipped-dest-newer' };
+                }
+
+            case 'create-copy':
+                if (createCopies) {
+                    // Criar cópia do arquivo com sufixo de conflito
+                    const ext = path.extname(conflict.filePath);
+                    const base = path.basename(conflict.filePath, ext);
+                    const dir = path.dirname(conflict.filePath);
+                    const conflictPath = path.join(dir, `${base} (conflito)${ext}`);
+
+                    // Criar arquivo de conflito
+                    const conflictFile = {
+                        ...sourceFile,
+                        path: conflictPath
+                    } as TFile;
+
+                    await this.copyFile(conflictFile, content);
+                    return { action: 'conflict-copy-created', resultPath: conflictPath };
+                } else {
+                    // Fallback para last-writes-wins
+                    return await this.resolveConflict(conflict, sourceFile, content, 'last-writes-wins', false);
+                }
+
+            case 'skip':
+                // Pular arquivo, não sincronizar
+                return { action: 'skipped' };
+
+            default:
+                throw new Error(`Estratégia de conflito desconhecida: ${strategy}`);
+        }
+    }
+
+    /**
+     * Gera nome único para cópia de conflito
+     */
+    private generateConflictName(filePath: string): string {
+        const ext = path.extname(filePath);
+        const base = path.basename(filePath, ext);
+        const dir = path.dirname(filePath);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+        return path.join(dir, `${base} (conflito ${timestamp})${ext}`);
     }
 }

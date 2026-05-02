@@ -33,6 +33,7 @@ skills-lock.json
 .cache/
 .nyc_output/
 coverage/
+doc/
 
 # Temporary files
 *.tmp

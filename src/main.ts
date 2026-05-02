@@ -1,6 +1,6 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile } from 'obsidian';
 import { DEFAULT_SETTINGS, MyPluginSettings, SyncFullSettingTab } from "./settings";
-import { FileSystemModule, SyncMetadata } from "./fsModule";
+import { FileSystemModule, SyncMetadata, ConflictInfo } from "./fsModule";
 
 // Interface para eventos de ficheiro na fila de sincronização
 interface FileChangeEvent {
@@ -220,7 +220,7 @@ export default class SyncFullPlugin extends Plugin {
 	}
 
 	/**
-	 * Sincroniza um ficheiro individual usando o FileSystemModule
+	 * Sincroniza um ficheiro individual usando o FileSystemModule com resolução de conflitos
 	 */
 	private async syncFile(change: FileChangeEvent): Promise<void> {
 		if (!this.fsModule) {
@@ -254,21 +254,48 @@ export default class SyncFullPlugin extends Plugin {
 				hash = require('crypto').createHash('sha256').update(content, 'utf-8').digest('hex');
 			}
 
-			// Verificar se o arquivo foi modificado usando o metadata
-			const isModified = await this.fsModule.isFileModified(change.file.path, hash, change.file.stat.size);
+			// Detectar conflitos
+			const conflict = await this.fsModule.detectConflict(change.file, hash);
 
-			if (!isModified) {
-				console.log(`[SyncFull] Arquivo não modificado, pulando: ${change.file.path}`);
-				return; // Pular sincronização se não houver modificações
+			if (conflict) {
+				console.log(`[SyncFull] Conflito detectado: ${change.file.path} (${conflict.conflictType})`);
+
+				// Resolver conflito baseado na estratégia configurada
+				const resolution = await this.fsModule.resolveConflict(
+					conflict,
+					change.file,
+					content,
+					this.settings.conflictResolution,
+					this.settings.createConflictCopies
+				);
+
+				// Log da ação de resolução
+				console.log(`[SyncFull] Conflito resolvido: ${resolution.action}`);
+
+				// Notificar usuário sobre conflito
+				if (resolution.action === 'conflict-copy-created') {
+					new Notice(`⚠️ SyncFull: Conflito criado - ${resolution.resultPath}`);
+				} else if (resolution.action === 'skipped') {
+					new Notice(`⚠️ SyncFull: Arquivo pulado por conflito - ${change.file.path}`);
+					return; // Não atualizar metadata se pulou
+				}
+			} else {
+				// Verificar se o arquivo foi modificado usando o metadata
+				const isModified = await this.fsModule.isFileModified(change.file.path, hash, change.file.stat.size);
+
+				if (!isModified) {
+					console.log(`[SyncFull] Arquivo não modificado, pulando: ${change.file.path}`);
+					return; // Pular sincronização se não houver modificações
+				}
+
+				// Copiar para o destino
+				await this.fsModule.copyFile(change.file, content);
 			}
-
-			// Copiar para o destino
-			await this.fsModule.copyFile(change.file, content);
 
 			// Atualizar metadata de sincronização
 			await this.fsModule.updateFileMetadata(change.file.path, hash, change.file.stat.size);
 
-			console.log(`[SyncFull] Arquivo sincronizado com hash: ${change.file.path}`);
+			console.log(`[SyncFull] Arquivo sincronizado: ${change.file.path}`);
 		}
 	}
 
