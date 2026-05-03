@@ -95,6 +95,10 @@ export class SecureSyncManager {
 			try {
 				// Escrever arquivo no servidor
 				const serverFilePath = path.join(this.basePath, filePath);
+				console.log(`[SecureSync] syncFileToServer - Caminho do servidor: ${serverFilePath}`);
+				console.log(`[SecureSync] syncFileToServer - basePath: ${this.basePath}`);
+				console.log(`[SecureSync] syncFileToServer - filePath: ${filePath}`);
+
 				await this.atomicWrite(serverFilePath, content);
 
 				// Liberar lock
@@ -106,6 +110,7 @@ export class SecureSyncManager {
 					message: `Arquivo ${filePath} sincronizado com sucesso`
 				};
 			} catch (writeError) {
+				console.error(`[SecureSync] syncFileToServer - Erro ao escrever arquivo:`, writeError);
 				// Garantir que lock seja liberado mesmo em caso de erro
 				await this.protectionManager.releaseLock(filePath, this.deviceId);
 				throw writeError;
@@ -151,15 +156,42 @@ export class SecureSyncManager {
 			for (const serverFile of serverFiles) {
 				const localFile = localFiles.find(f => f.path === serverFile.path);
 
-				if (!localFile || serverFile.mtime > localFile.mtime) {
+				console.log(`[SecureSync] Verificando arquivo: ${serverFile.path}`);
+				console.log(`[SecureSync] - Servidor mtime: ${new Date(serverFile.mtime).toISOString()} (${serverFile.mtime})`);
+				console.log(`[SecureSync] - Local ${localFile ? 'mtime: ' + new Date(localFile.mtime).toISOString() + ` (${localFile.mtime})` : 'não existe'}`);
+
+				if (!localFile) {
+					console.log(`[SecureSync] - Arquivo não existe localmente, será baixado (CREATE)`);
 					operations.push({
 						id: `download-${serverFile.path}`,
 						deviceId: this.deviceId,
 						filePath: serverFile.path,
-						operation: localFile ? 'update' : 'create',
+						operation: 'create',
 						timestamp: Date.now(),
 						status: 'pending'
 					});
+				} else {
+					const timeDiff = serverFile.mtime - localFile.mtime;
+					const toleranceMs = 2000; // 2 segundos de tolerância para problemas de precisão de timestamp
+
+					console.log(`[SecureSync] - Diferença de tempo: ${timeDiff}ms (servidor - local)`);
+
+					if (Math.abs(timeDiff) <= toleranceMs) {
+						console.log(`[SecureSync] - Arquivos considerados idênticos (dentro da tolerância de ${toleranceMs}ms), ignorando`);
+					} else if (timeDiff > toleranceMs) {
+						console.log(`[SecureSync] - Servidor é ${timeDiff}ms mais recente, será atualizado (UPDATE)`);
+						console.log(`[SecureSync] - Diferença em segundos: ${(timeDiff / 1000).toFixed(2)}s`);
+						operations.push({
+							id: `download-${serverFile.path}`,
+							deviceId: this.deviceId,
+							filePath: serverFile.path,
+							operation: 'update',
+							timestamp: Date.now(),
+							status: 'pending'
+						});
+					} else {
+						console.log(`[SecureSync] - Local é ${Math.abs(timeDiff)}ms mais recente, ignorando`);
+					}
 				}
 			}
 
@@ -168,6 +200,7 @@ export class SecureSyncManager {
 				const serverFile = serverFiles.find(f => f.path === localFile.path);
 
 				if (!serverFile) {
+					console.log(`[SecureSync] Arquivo local não existe no servidor, será deletado: ${localFile.path}`);
 					operations.push({
 						id: `delete-${localFile.path}`,
 						deviceId: this.deviceId,
@@ -177,6 +210,21 @@ export class SecureSyncManager {
 						status: 'pending'
 					});
 				}
+			}
+
+			console.log(`[SecureSync] Resumo da sincronização:`);
+			console.log(`[SecureSync] - Total de operações: ${operations.length}`);
+			console.log(`[SecureSync] - Arquivos para criar: ${operations.filter(op => op.operation === 'create').length}`);
+			console.log(`[SecureSync] - Arquivos para atualizar: ${operations.filter(op => op.operation === 'update').length}`);
+			console.log(`[SecureSync] - Arquivos para deletar: ${operations.filter(op => op.operation === 'delete').length}`);
+
+			if (operations.length === 0) {
+				console.log(`[SecureSync] Nenhuma operação necessária - arquivos já sincronizados`);
+				return {
+					success: true,
+					message: 'Todos os arquivos já estão sincronizados',
+					operationsProcessed: 0
+				};
 			}
 
 			// Executar operações
@@ -445,19 +493,55 @@ export class SecureSyncManager {
 		const tempPath = `${filePath}.tmp.${Date.now()}.${Math.random().toString(36).substr(2, 9)}`;
 
 		try {
+			console.log(`[SecureSync] atomicWrite - Iniciando salvamento: ${filePath}`);
+			console.log(`[SecureSync] atomicWrite - Arquivo temporário: ${tempPath}`);
+			console.log(`[SecureSync] atomicWrite - Tipo de conteúdo: ${typeof content}`);
+			console.log(`[SecureSync] atomicWrite - Tamanho do conteúdo: ${content instanceof ArrayBuffer ? content.byteLength : content.length} bytes`);
+
+			// Verificar se diretório existe
+			const dir = path.dirname(filePath);
+			console.log(`[SecureSync] atomicWrite - Verificando diretório: ${dir}`);
+
+			try {
+				await fs.access(dir);
+				console.log(`[SecureSync] atomicWrite - Diretório existe`);
+			} catch (error) {
+				console.log(`[SecureSync] atomicWrite - Diretório não existe, criando...`);
+				await fs.mkdir(dir, { recursive: true });
+				console.log(`[SecureSync] atomicWrite - Diretório criado`);
+			}
+
 			// Converter ArrayBuffer para Uint8Array se necessário
 			const writeContent = content instanceof ArrayBuffer
 				? new Uint8Array(content)
 				: content;
 
+			console.log(`[SecureSync] atomicWrite - Escrevendo arquivo temporário...`);
 			await fs.writeFile(tempPath, writeContent);
+			console.log(`[SecureSync] atomicWrite - Arquivo temporário escrito com sucesso`);
+
+			console.log(`[SecureSync] atomicWrite - Renomeando para arquivo final...`);
 			await fs.rename(tempPath, filePath);
+			console.log(`[SecureSync] atomicWrite - Arquivo salvo com sucesso: ${filePath}`);
+
+			// Verificar se arquivo realmente foi salvo
+			try {
+				const stats = await fs.stat(filePath);
+				console.log(`[SecureSync] atomicWrite - Verificação: arquivo existe, tamanho: ${stats.size} bytes`);
+			} catch (error) {
+				console.error(`[SecureSync] atomicWrite - ERRO: arquivo não foi salvo corretamente:`, error);
+				throw error;
+			}
+
 		} catch (error) {
+			console.error(`[SecureSync] atomicWrite - Erro ao salvar arquivo ${filePath}:`, error);
+
 			// Limpar arquivo temporário em caso de erro
 			try {
 				await fs.unlink(tempPath);
+				console.log(`[SecureSync] atomicWrite - Arquivo temporário removido`);
 			} catch {
-				// Ignorar erro ao limpar
+				console.log(`[SecureSync] atomicWrite - Não foi possível remover arquivo temporário`);
 			}
 			throw error;
 		}

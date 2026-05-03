@@ -29,8 +29,13 @@ export default class SyncFullPlugin extends Plugin {
 	private isMobileDevice: boolean = false;
 	private isOnMobileData: boolean = false;
 	private monthlyDataUsage: number = 0; // MB
+	private startTime: number = 0; // Timestamp de inicialização
+	private initializationGracePeriod: number = 10000; // 10 segundos para ignorar eventos iniciais
 
 	async onload() {
+		this.startTime = Date.now();
+		console.log(`[SyncFull] Plugin inicializado em: ${new Date(this.startTime).toISOString()}`);
+
 		await this.loadSettings();
 
 		// Gerar ID do dispositivo se não existir
@@ -386,13 +391,26 @@ export default class SyncFullPlugin extends Plugin {
 	 * Processa alterações de ficheiros com sistema de debounce
 	 */
 	private handleFileChange(file: TFile, type: 'modify' | 'create' | 'delete') {
+		const currentTime = Date.now();
+		const timeSinceInit = currentTime - this.startTime;
+
 		console.log(`[SyncFull] Ficheiro ${type}: ${file.path}`);
+		console.log(`[SyncFull] Timestamp atual: ${new Date(currentTime).toISOString()}`);
+		console.log(`[SyncFull] Tempo desde inicialização: ${timeSinceInit}ms`);
+
+		// Ignorar eventos durante o período de graça (inicialização)
+		if (timeSinceInit < this.initializationGracePeriod) {
+			console.log(`[SyncFull] IGNORANDO evento - dentro do período de graça (${this.initializationGracePeriod}ms)`);
+			return;
+		}
+
+		console.log(`[SyncFull] Processando evento - fora do período de graça`);
 
 		// Adicionar à fila de sincronização
 		const changeEvent: FileChangeEvent = {
 			file,
 			type,
-			timestamp: Date.now()
+			timestamp: currentTime
 		};
 
 		this.syncQueue.push(changeEvent);
@@ -404,6 +422,7 @@ export default class SyncFullPlugin extends Plugin {
 
 		// Configurar novo timer
 		this.debounceTimer = setTimeout(() => {
+			console.log(`[SyncFull] Processando fila de sincronização com ${this.syncQueue.length} itens`);
 			this.processSyncQueue();
 		}, this.debounceDelay);
 
@@ -473,9 +492,29 @@ export default class SyncFullPlugin extends Plugin {
 			}
 
 			if (this.isServer) {
-				// Servidor: apenas valida e integra (se vier de cliente autorizado)
+				// Servidor: valida e integra alteração
 				console.log(`[SyncFull] Servidor recebendo alteração: ${change.file.path}`);
-				// TODO: Implementar recebimento de alterações de clientes
+
+				// Salvar arquivo na PastaBase do servidor
+				const serverFilePath = `${change.file.path}`;
+				console.log(`[SyncFull] Servidor - Salvando arquivo em: ${serverFilePath}`);
+
+				try {
+					const result = await this.secureSyncManager!.validateAndIntegrate(
+						serverFilePath,
+						content,
+						this.deviceId
+					);
+
+					if (!result.success) {
+						throw new Error(result.error || 'Erro ao integrar alteração no servidor');
+					}
+
+					console.log(`[SyncFull] Servidor - Arquivo integrado com sucesso: ${change.file.path}`);
+				} catch (error) {
+					console.error(`[SyncFull] Servidor - Erro ao integrar alteração:`, error);
+					throw error;
+				}
 			} else {
 				// Cliente: envia para servidor
 				const result = await this.secureSyncManager.syncFileToServer(
@@ -528,9 +567,117 @@ export default class SyncFullPlugin extends Plugin {
 		}
 
 		if (this.isServer) {
-			// Servidor: download para clientes
-			console.log('[SyncFull] Servidor: notificando clientes sobre mudanças');
-			if (this.settings.enableNotifications) new Notice('✅ Servidor: Clientes notificados');
+			// Servidor: verificar status e criar estrutura se necessário
+			try {
+				console.log('[SyncFull] Servidor: verificando status da PastaBase...');
+				if (this.settings.enableNotifications) new Notice('🔍 Verificando arquivos no servidor...');
+
+				// Verificação robusta se PastaBase está vazia
+				const fs = require('fs');
+				const path = require('path');
+
+				let realFileCount = 0;
+
+				// Verificar se pasta existe
+				if (!fs.existsSync(this.settings.serverPath)) {
+					console.log('[SyncFull] PastaBase não existe - considerando vazia');
+					realFileCount = 0;
+				} else {
+					// Verificar conteúdo real da PastaBase
+					try {
+						const entries = fs.readdirSync(this.settings.serverPath, { withFileTypes: true });
+						const realFiles = entries.filter((entry: any) => {
+							console.log(`[SyncFull] DEBUG - Analisando: ${entry.name} (isDirectory: ${entry.isDirectory()})`);
+
+							// Ignorar arquivos de sistema e pastas especiais
+							if (entry.name.startsWith('.')) {
+								console.log(`[SyncFull] DEBUG - Ignorado (começa com .): ${entry.name}`);
+								return false;
+							}
+							if (entry.name === '.sync-protection') {
+								console.log(`[SyncFull] DEBUG - Ignorado (.sync-protection): ${entry.name}`);
+								return false;
+							}
+							// Ignorar arquivos de sistema Windows
+							if (entry.name.toLowerCase() === 'desktop.ini') {
+								console.log(`[SyncFull] DEBUG - Ignorado (desktop.ini): ${entry.name}`);
+								return false;
+							}
+							if (entry.name.toLowerCase() === 'thumbs.db') {
+								console.log(`[SyncFull] DEBUG - Ignorado (thumbs.db): ${entry.name}`);
+								return false;
+							}
+							if (entry.name.toLowerCase() === 'ds_store') {
+								console.log(`[SyncFull] DEBUG - Ignorado (DS_Store): ${entry.name}`);
+								return false;
+							}
+							if (entry.isDirectory()) {
+								console.log(`[SyncFull] DEBUG - É diretório: ${entry.name}`);
+								// Verificar se subpasta tem arquivos reais
+								const subPath = path.join(this.settings.serverPath, entry.name);
+								try {
+									const subEntries = fs.readdirSync(subPath);
+									console.log(`[SyncFull] DEBUG - Subentradas em ${entry.name}:`, subEntries);
+									const realSubFiles = subEntries.filter((subEntry: any) => !subEntry.startsWith('.'));
+									console.log(`[SyncFull] DEBUG - Arquivos reais em ${entry.name}: ${realSubFiles.length}`);
+									return realSubFiles.length > 0;
+								} catch (error) {
+									console.log(`[SyncFull] DEBUG - Erro ao ler ${entry.name}:`, error);
+									return false;
+								}
+							}
+							console.log(`[SyncFull] DEBUG - Arquivo considerado válido: ${entry.name}`);
+							return true;
+						});
+
+						realFileCount = realFiles.length;
+						console.log(`[SyncFull] Verificação real: ${realFileCount} arquivos encontrados`);
+
+					} catch (error) {
+						console.error('[SyncFull] Erro ao verificar PastaBase:', error);
+						realFileCount = 0;
+					}
+				}
+
+				if (realFileCount === 0) {
+					console.log('[SyncFull] PastaBase vazia - criando estrutura...');
+					if (this.settings.enableNotifications) new Notice('🔧 Criando estrutura base...');
+
+					// Criar estrutura básica
+					if (!fs.existsSync(this.settings.serverPath)) {
+						fs.mkdirSync(this.settings.serverPath, { recursive: true });
+						console.log(`[SyncFull] PastaBase criada: ${this.settings.serverPath}`);
+					}
+
+					// Criar subpastas
+					const folders = ['vault-data', 'vault-data/Notas', '.sync-protection'];
+					folders.forEach(folder => {
+						const folderPath = path.join(this.settings.serverPath, folder);
+						if (!fs.existsSync(folderPath)) {
+							fs.mkdirSync(folderPath, { recursive: true });
+							console.log(`[SyncFull] Pasta criada: ${folder}`);
+						}
+					});
+
+					// Criar arquivo README
+					const readmePath = path.join(this.settings.serverPath, 'vault-data/Notas/README.md');
+					if (!fs.existsSync(readmePath)) {
+						const content = `# Bem-vindo ao SyncFull!\n\nCriado em: ${new Date().toLocaleString('pt-BR')}\nServidor: ${this.settings.deviceName || 'Servidor SyncFull'}`;
+						fs.writeFileSync(readmePath, content);
+						console.log('[SyncFull] README.md criado');
+					}
+
+					if (this.settings.enableNotifications) {
+						new Notice(`✅ Estrutura criada! PastaBase pronta para uso`);
+					}
+				} else {
+					console.log(`[SyncFull] Servidor: ${realFileCount} arquivos disponíveis`);
+					if (this.settings.enableNotifications) new Notice(`✅ Servidor: ${realFileCount} arquivos prontos`);
+				}
+			} catch (error) {
+				console.error('[SyncFull] Erro no servidor:', error);
+				if (this.settings.enableNotifications) new Notice('❌ Erro ao verificar servidor');
+			}
 		} else {
 			// Cliente: download do servidor
 			try {
