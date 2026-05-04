@@ -187,18 +187,49 @@ export class SyncProtectionManager {
 	}
 
 	/**
-	 * Cria um lock para operação em arquivo
+	 * Cria um lock para operação em arquivo (escrita atômica)
 	 */
 	async createLock(filePath: string, deviceId: string): Promise<ProtectionResult> {
 		try {
-			const lockFile = path.join(this.locksPath, `${path.basename(filePath)}.lock`);
+			// Usar hash ou path seguro para evitar problemas com subpastas ou caracteres
+			const safeFilename = Buffer.from(filePath).toString('base64').replace(/[/+=]/g, '_');
+			const lockFile = path.join(this.locksPath, `${safeFilename}.lock`);
 			const lockData = {
 				deviceId,
 				filePath,
 				timestamp: Date.now()
 			};
 
-			await fs.writeFile(lockFile, JSON.stringify(lockData, null, 2), 'utf8');
+			try {
+				// A flag 'wx' garante criação exclusiva. Falha se o arquivo já existir.
+				const fileHandle = await fs.open(lockFile, 'wx');
+				await fileHandle.writeFile(JSON.stringify(lockData, null, 2), 'utf8');
+				await fileHandle.close();
+			} catch (err: any) {
+				if (err.code === 'EEXIST') {
+					// O lock já existe. Verificar se expirou (preso).
+					try {
+						const existingLockContent = await fs.readFile(lockFile, 'utf8');
+						const existingLockData = JSON.parse(existingLockContent);
+						const lockAgeMs = Date.now() - existingLockData.timestamp;
+						const LOCK_TIMEOUT = 5 * 60 * 1000; // 5 minutos
+
+						if (lockAgeMs > LOCK_TIMEOUT) {
+							console.log(`[SyncProtection] Lock expirado encontrado para ${filePath}, sobrescrevendo...`);
+							await fs.writeFile(lockFile, JSON.stringify(lockData, null, 2), 'utf8');
+						} else {
+							return {
+								success: false,
+								error: `Arquivo bloqueado pelo dispositivo ${existingLockData.deviceId}`
+							};
+						}
+					} catch (readErr) {
+						return { success: false, error: 'Erro ao verificar lock existente' };
+					}
+				} else {
+					throw err;
+				}
+			}
 
 			await this.logOperation(deviceId, 'LOCK_CREATED', `Lock criado para ${filePath}`);
 
@@ -220,14 +251,19 @@ export class SyncProtectionManager {
 	 */
 	async releaseLock(filePath: string, deviceId: string): Promise<ProtectionResult> {
 		try {
-			const lockFile = path.join(this.locksPath, `${path.basename(filePath)}.lock`);
+			const safeFilename = Buffer.from(filePath).toString('base64').replace(/[/+=]/g, '_');
+			const lockFile = path.join(this.locksPath, `${safeFilename}.lock`);
 
 			// Verificar se lock existe e pertence ao dispositivo
 			try {
 				const lockContent = await fs.readFile(lockFile, 'utf8');
 				const lockData = JSON.parse(lockContent);
 
-				if (lockData.deviceId !== deviceId) {
+				// Permite liberar se for dono ou se o lock estiver expirado (fallback de segurança)
+				const lockAgeMs = Date.now() - lockData.timestamp;
+				const LOCK_TIMEOUT = 5 * 60 * 1000;
+				
+				if (lockData.deviceId !== deviceId && lockAgeMs <= LOCK_TIMEOUT) {
 					return {
 						success: false,
 						error: 'Lock pertence a outro dispositivo'
@@ -236,6 +272,10 @@ export class SyncProtectionManager {
 			} catch (error) {
 				// Lock não existe ou está corrompido
 				console.warn('[SyncProtection] Lock não encontrado ou corrompido');
+				return {
+					success: true,
+					message: 'Lock não existia ou já foi liberado'
+				};
 			}
 
 			await fs.unlink(lockFile);
@@ -256,15 +296,59 @@ export class SyncProtectionManager {
 	}
 
 	/**
-	 * Verifica se existe lock para um arquivo
+	 * Limpa arquivos .lock órfãos ou expirados
+	 */
+	async cleanOrphanLocks(): Promise<void> {
+		try {
+			const files = await fs.readdir(this.locksPath);
+			const now = Date.now();
+			const LOCK_TIMEOUT = 5 * 60 * 1000;
+
+			for (const file of files) {
+				if (!file.endsWith('.lock')) continue;
+
+				const lockPath = path.join(this.locksPath, file);
+				try {
+					const content = await fs.readFile(lockPath, 'utf8');
+					const lockData = JSON.parse(content);
+					
+					// Deletar se expirado
+					if (now - lockData.timestamp > LOCK_TIMEOUT) {
+						await fs.unlink(lockPath);
+						console.log(`[SyncProtection] Lock órfão removido: ${file}`);
+					}
+				} catch (e) {
+					// Se o ficheiro estiver corrompido, apagamo-lo
+					await fs.unlink(lockPath);
+					console.log(`[SyncProtection] Lock corrompido removido: ${file}`);
+				}
+			}
+		} catch (error) {
+			console.error('[SyncProtection] Erro ao limpar locks órfãos:', error);
+		}
+	}
+
+	/**
+	 * Verifica se existe lock válido para um arquivo
 	 */
 	private async checkFileLock(filePath: string): Promise<boolean> {
 		try {
-			const lockFile = path.join(this.locksPath, `${path.basename(filePath)}.lock`);
-			await fs.access(lockFile);
+			const safeFilename = Buffer.from(filePath).toString('base64').replace(/[/+=]/g, '_');
+			const lockFile = path.join(this.locksPath, `${safeFilename}.lock`);
+			
+			const content = await fs.readFile(lockFile, 'utf8');
+			const lockData = JSON.parse(content);
+			
+			const lockAgeMs = Date.now() - lockData.timestamp;
+			const LOCK_TIMEOUT = 5 * 60 * 1000;
+			
+			if (lockAgeMs > LOCK_TIMEOUT) {
+				return false; // Lock está expirado
+			}
+
 			return true;
 		} catch {
-			return false;
+			return false; // Se o arquivo não existir, não há lock
 		}
 	}
 
@@ -300,15 +384,16 @@ export class SyncProtectionManager {
 	async revokeDeviceAuthorization(deviceId: string): Promise<ProtectionResult> {
 		try {
 			const devices = await this.loadAuthorizedDevices();
+			const device = devices[deviceId];
 			
-			if (!devices[deviceId]) {
+			if (!device) {
 				return {
 					success: false,
 					error: 'Dispositivo não encontrado'
 				};
 			}
 
-			const deviceName = devices[deviceId].name;
+			const deviceName = device.name;
 			delete devices[deviceId];
 
 			await this.saveAuthorizedDevices(devices);

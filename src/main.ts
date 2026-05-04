@@ -5,7 +5,8 @@ import { SecureSyncManager, SyncResult, FileChange } from "./secureSync";
 
 // Interface para eventos de ficheiro na fila de sincronização
 interface FileChangeEvent {
-	file: TFile;
+	file: TFile | null;
+	path: string;
 	type: 'modify' | 'create' | 'delete';
 	timestamp: number;
 }
@@ -17,6 +18,7 @@ export default class SyncFullPlugin extends Plugin {
 	private syncQueue: FileChangeEvent[] = [];
 	private debounceTimer: NodeJS.Timeout | null = null;
 	private debounceDelay: number = 2500; // 2.5 segundos de debounce
+	private pollingTimer: NodeJS.Timeout | null = null;
 	private statusBarItemEl: HTMLElement | null = null;
 
 	// Novos gerenciadores do modelo protegido
@@ -54,12 +56,21 @@ export default class SyncFullPlugin extends Plugin {
 		// Registrar eventos de monitorização do vault
 		this.registerVaultEvents();
 
-		// Comando para Forçar Sincronização
+		// Comando para Enviar Tudo (Push)
 		this.addCommand({
-			id: 'force-sync',
-			name: 'Forçar Sincronização',
+			id: 'syncfull-push',
+			name: 'SyncFull: Enviar tudo para a PastaBase (Upload)',
 			callback: async () => {
-				await this.forceSync();
+				await this.pushToServer();
+			}
+		});
+
+		// Comando para Baixar Tudo (Pull)
+		this.addCommand({
+			id: 'syncfull-pull',
+			name: 'SyncFull: Baixar tudo da PastaBase (Download)',
+			callback: async () => {
+				await this.pullFromServer();
 			}
 		});
 
@@ -83,12 +94,19 @@ export default class SyncFullPlugin extends Plugin {
 
 		// Adicionar aba de configurações
 		this.addSettingTab(new SyncFullSettingTab(this.app, this));
+
+		// Iniciar polling se configurado
+		this.startAutoSync();
 	}
 
 	async onunload() {
 		// Limpar timer de debounce
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
+		}
+
+		if (this.pollingTimer) {
+			clearInterval(this.pollingTimer);
 		}
 
 		// Remover status bar item
@@ -164,10 +182,13 @@ export default class SyncFullPlugin extends Plugin {
 
 			// Inicializar SecureSyncManager
 			this.secureSyncManager = new SecureSyncManager(
+				this.app,
 				this.protectionManager,
 				this.deviceId,
 				true, // isServer
-				this.settings.serverPath
+				this.settings.serverPath,
+				'',
+				this.settings.conflictResolution
 			);
 
 			// Autorizar este dispositivo (servidor)
@@ -215,11 +236,13 @@ export default class SyncFullPlugin extends Plugin {
 
 			// Inicializar SecureSyncManager
 			this.secureSyncManager = new SecureSyncManager(
+				this.app,
 				this.protectionManager,
 				this.deviceId,
 				false, // isServer
 				this.settings.serverAddress,
-				this.settings.clientPath
+				this.settings.clientPath,
+				this.settings.conflictResolution
 			);
 
 			console.log('[SyncFull] Cliente inicializado com sucesso');
@@ -355,7 +378,7 @@ export default class SyncFullPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('modify', (file) => {
 				if (file instanceof TFile && this.shouldProcessFile(file)) {
-					this.handleFileChange(file, 'modify');
+					this.handleFileChange(file, file.path, 'modify');
 				}
 			})
 		);
@@ -364,7 +387,7 @@ export default class SyncFullPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('create', (file) => {
 				if (file instanceof TFile && this.shouldProcessFile(file)) {
-					this.handleFileChange(file, 'create');
+					this.handleFileChange(file, file.path, 'create');
 				}
 			})
 		);
@@ -373,7 +396,18 @@ export default class SyncFullPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
 				if (file instanceof TFile && this.shouldProcessFile(file)) {
-					this.handleFileChange(file, 'delete');
+					this.handleFileChange(file, file.path, 'delete');
+				}
+			})
+		);
+
+		// Evento para quando um ficheiro é renomeado
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (file instanceof TFile && this.shouldProcessFile(file)) {
+					// Trata o arquivo antigo como deletado e o novo como criado
+					this.handleFileChange(null, oldPath, 'delete');
+					this.handleFileChange(file, file.path, 'create');
 				}
 			})
 		);
@@ -390,11 +424,11 @@ export default class SyncFullPlugin extends Plugin {
 	/**
 	 * Processa alterações de ficheiros com sistema de debounce
 	 */
-	private handleFileChange(file: TFile, type: 'modify' | 'create' | 'delete') {
+	private handleFileChange(file: TFile | null, filePath: string, type: 'modify' | 'create' | 'delete') {
 		const currentTime = Date.now();
 		const timeSinceInit = currentTime - this.startTime;
 
-		console.log(`[SyncFull] Ficheiro ${type}: ${file.path}`);
+		console.log(`[SyncFull] Ficheiro ${type}: ${filePath}`);
 		console.log(`[SyncFull] Timestamp atual: ${new Date(currentTime).toISOString()}`);
 		console.log(`[SyncFull] Tempo desde inicialização: ${timeSinceInit}ms`);
 
@@ -409,6 +443,7 @@ export default class SyncFullPlugin extends Plugin {
 		// Adicionar à fila de sincronização
 		const changeEvent: FileChangeEvent = {
 			file,
+			path: filePath,
 			type,
 			timestamp: currentTime
 		};
@@ -445,7 +480,7 @@ export default class SyncFullPlugin extends Plugin {
 		const latestChanges = new Map<string, FileChangeEvent>();
 
 		for (const change of this.syncQueue) {
-			const key = change.file.path;
+			const key = change.path;
 			if (!latestChanges.has(key) || latestChanges.get(key)!.timestamp < change.timestamp) {
 				latestChanges.set(key, change);
 			}
@@ -477,12 +512,38 @@ export default class SyncFullPlugin extends Plugin {
 		}
 
 		if (change.type === 'delete') {
-			// Para deleção, usar o fluxo normal (implementação futura)
-			console.log(`[SyncFull] Deleção de arquivo: ${change.file.path}`);
-			// TODO: Implementar deleção segura
+			// Para deleção, usar o fluxo de deleção segura
+			console.log(`[SyncFull] Deleção de arquivo: ${change.path}`);
+
+			if (this.isServer) {
+				// Servidor: deletar arquivo localmente na PastaBase
+				console.log(`[SyncFull] Servidor - Deletando arquivo localmente: ${change.path}`);
+
+				try {
+					const result = await this.secureSyncManager!.deleteFileLocally(change.path);
+
+					if (!result.success) {
+						throw new Error(result.error || 'Erro ao deletar arquivo no servidor');
+					}
+
+					console.log(`[SyncFull] Servidor - Arquivo deletado com sucesso: ${change.path}`);
+				} catch (error) {
+					console.error(`[SyncFull] Servidor - Erro ao deletar arquivo:`, error);
+					throw error;
+				}
+			} else {
+				// Cliente: solicitar deleção no servidor
+				const result = await this.secureSyncManager.deleteFileFromServer(change.path);
+
+				if (!result.success) {
+					throw new Error(result.error || 'Erro ao deletar arquivo no servidor');
+				}
+			}
 		} else {
+			if (!change.file) return;
+
 			// Ler conteúdo do arquivo
-			const isBinaryFile = this.isBinaryFile(change.file.path);
+			const isBinaryFile = this.isBinaryFile(change.path);
 			let content: string | ArrayBuffer;
 
 			if (isBinaryFile) {
@@ -493,10 +554,10 @@ export default class SyncFullPlugin extends Plugin {
 
 			if (this.isServer) {
 				// Servidor: valida e integra alteração
-				console.log(`[SyncFull] Servidor recebendo alteração: ${change.file.path}`);
+				console.log(`[SyncFull] Servidor recebendo alteração: ${change.path}`);
 
 				// Salvar arquivo na PastaBase do servidor
-				const serverFilePath = `${change.file.path}`;
+				const serverFilePath = `${change.path}`;
 				console.log(`[SyncFull] Servidor - Salvando arquivo em: ${serverFilePath}`);
 
 				try {
@@ -510,7 +571,7 @@ export default class SyncFullPlugin extends Plugin {
 						throw new Error(result.error || 'Erro ao integrar alteração no servidor');
 					}
 
-					console.log(`[SyncFull] Servidor - Arquivo integrado com sucesso: ${change.file.path}`);
+					console.log(`[SyncFull] Servidor - Arquivo integrado com sucesso: ${change.path}`);
 				} catch (error) {
 					console.error(`[SyncFull] Servidor - Erro ao integrar alteração:`, error);
 					throw error;
@@ -518,7 +579,7 @@ export default class SyncFullPlugin extends Plugin {
 			} else {
 				// Cliente: envia para servidor
 				const result = await this.secureSyncManager.syncFileToServer(
-					change.file.path,
+					change.path,
 					content
 				);
 
@@ -555,10 +616,10 @@ export default class SyncFullPlugin extends Plugin {
 	}
 
 	/**
-	 * Força sincronização completa
+	 * Faz o upload de todo o Vault para o servidor
 	 */
-	async forceSync(): Promise<void> {
-		console.log('[SyncFull] forceSync() chamado');
+	async pushToServer(): Promise<void> {
+		console.log('[SyncFull] pushToServer() chamado');
 
 		if (!this.secureSyncManager) {
 			console.error('[SyncFull] SecureSyncManager não inicializado');
@@ -566,133 +627,69 @@ export default class SyncFullPlugin extends Plugin {
 			return;
 		}
 
-		if (this.isServer) {
-			// Servidor: verificar status e criar estrutura se necessário
-			try {
-				console.log('[SyncFull] Servidor: verificando status da PastaBase...');
-				if (this.settings.enableNotifications) new Notice('🔍 Verificando arquivos no servidor...');
+		try {
+			if (this.settings.enableNotifications) new Notice('📤 Enviando arquivos para o servidor...');
+			const result = await this.secureSyncManager.uploadToServer();
 
-				// Verificação robusta se PastaBase está vazia
-				const fs = require('fs');
-				const path = require('path');
-
-				let realFileCount = 0;
-
-				// Verificar se pasta existe
-				if (!fs.existsSync(this.settings.serverPath)) {
-					console.log('[SyncFull] PastaBase não existe - considerando vazia');
-					realFileCount = 0;
-				} else {
-					// Verificar conteúdo real da PastaBase
-					try {
-						const entries = fs.readdirSync(this.settings.serverPath, { withFileTypes: true });
-						const realFiles = entries.filter((entry: any) => {
-							console.log(`[SyncFull] DEBUG - Analisando: ${entry.name} (isDirectory: ${entry.isDirectory()})`);
-
-							// Ignorar arquivos de sistema e pastas especiais
-							if (entry.name.startsWith('.')) {
-								console.log(`[SyncFull] DEBUG - Ignorado (começa com .): ${entry.name}`);
-								return false;
-							}
-							if (entry.name === '.sync-protection') {
-								console.log(`[SyncFull] DEBUG - Ignorado (.sync-protection): ${entry.name}`);
-								return false;
-							}
-							// Ignorar arquivos de sistema Windows
-							if (entry.name.toLowerCase() === 'desktop.ini') {
-								console.log(`[SyncFull] DEBUG - Ignorado (desktop.ini): ${entry.name}`);
-								return false;
-							}
-							if (entry.name.toLowerCase() === 'thumbs.db') {
-								console.log(`[SyncFull] DEBUG - Ignorado (thumbs.db): ${entry.name}`);
-								return false;
-							}
-							if (entry.name.toLowerCase() === 'ds_store') {
-								console.log(`[SyncFull] DEBUG - Ignorado (DS_Store): ${entry.name}`);
-								return false;
-							}
-							if (entry.isDirectory()) {
-								console.log(`[SyncFull] DEBUG - É diretório: ${entry.name}`);
-								// Verificar se subpasta tem arquivos reais
-								const subPath = path.join(this.settings.serverPath, entry.name);
-								try {
-									const subEntries = fs.readdirSync(subPath);
-									console.log(`[SyncFull] DEBUG - Subentradas em ${entry.name}:`, subEntries);
-									const realSubFiles = subEntries.filter((subEntry: any) => !subEntry.startsWith('.'));
-									console.log(`[SyncFull] DEBUG - Arquivos reais em ${entry.name}: ${realSubFiles.length}`);
-									return realSubFiles.length > 0;
-								} catch (error) {
-									console.log(`[SyncFull] DEBUG - Erro ao ler ${entry.name}:`, error);
-									return false;
-								}
-							}
-							console.log(`[SyncFull] DEBUG - Arquivo considerado válido: ${entry.name}`);
-							return true;
-						});
-
-						realFileCount = realFiles.length;
-						console.log(`[SyncFull] Verificação real: ${realFileCount} arquivos encontrados`);
-
-					} catch (error) {
-						console.error('[SyncFull] Erro ao verificar PastaBase:', error);
-						realFileCount = 0;
-					}
-				}
-
-				if (realFileCount === 0) {
-					console.log('[SyncFull] PastaBase vazia - criando estrutura...');
-					if (this.settings.enableNotifications) new Notice('🔧 Criando estrutura base...');
-
-					// Criar estrutura básica
-					if (!fs.existsSync(this.settings.serverPath)) {
-						fs.mkdirSync(this.settings.serverPath, { recursive: true });
-						console.log(`[SyncFull] PastaBase criada: ${this.settings.serverPath}`);
-					}
-
-					// Criar subpastas
-					const folders = ['vault-data', 'vault-data/Notas', '.sync-protection'];
-					folders.forEach(folder => {
-						const folderPath = path.join(this.settings.serverPath, folder);
-						if (!fs.existsSync(folderPath)) {
-							fs.mkdirSync(folderPath, { recursive: true });
-							console.log(`[SyncFull] Pasta criada: ${folder}`);
-						}
-					});
-
-					// Criar arquivo README
-					const readmePath = path.join(this.settings.serverPath, 'vault-data/Notas/README.md');
-					if (!fs.existsSync(readmePath)) {
-						const content = `# Bem-vindo ao SyncFull!\n\nCriado em: ${new Date().toLocaleString('pt-BR')}\nServidor: ${this.settings.deviceName || 'Servidor SyncFull'}`;
-						fs.writeFileSync(readmePath, content);
-						console.log('[SyncFull] README.md criado');
-					}
-
-					if (this.settings.enableNotifications) {
-						new Notice(`✅ Estrutura criada! PastaBase pronta para uso`);
-					}
-				} else {
-					console.log(`[SyncFull] Servidor: ${realFileCount} arquivos disponíveis`);
-					if (this.settings.enableNotifications) new Notice(`✅ Servidor: ${realFileCount} arquivos prontos`);
-				}
-			} catch (error) {
-				console.error('[SyncFull] Erro no servidor:', error);
-				if (this.settings.enableNotifications) new Notice('❌ Erro ao verificar servidor');
+			if (result.success) {
+				if (this.settings.enableNotifications) new Notice(`✅ ${result.message}`);
+			} else {
+				if (this.settings.enableNotifications) new Notice(`❌ Erro no upload: ${result.error}`);
 			}
-		} else {
-			// Cliente: download do servidor
-			try {
-				if (this.settings.enableNotifications) new Notice('🔍 Baixando alterações do servidor...');
-				const result = await this.secureSyncManager.downloadFromServer();
+		} catch (error) {
+			console.error('[SyncFull] Erro no upload:', error);
+			if (this.settings.enableNotifications) new Notice('❌ Erro inesperado ao enviar para o servidor');
+		}
+	}
 
-				if (result.success) {
-					if (this.settings.enableNotifications) new Notice(`✅ ${result.message}`);
-				} else {
-					if (this.settings.enableNotifications) new Notice(`❌ Erro: ${result.error}`);
+	/**
+	 * Inicia o polling de sincronização em background
+	 */
+	public startAutoSync(): void {
+		if (this.pollingTimer) {
+			clearInterval(this.pollingTimer);
+			this.pollingTimer = null;
+		}
+
+		if (this.settings.autoSync && this.settings.syncInterval > 0) {
+			console.log(`[SyncFull] Iniciando polling com intervalo de ${this.settings.syncInterval} segundos.`);
+			this.pollingTimer = setInterval(async () => {
+				// Só fazer pull se não tiver modificações locais na fila de espera pendentes
+				if (this.syncQueue.length === 0) {
+					await this.pullFromServer(true);
 				}
-			} catch (error) {
-				console.error('[SyncFull] Erro ao forçar sincronização:', error);
-				if (this.settings.enableNotifications) new Notice('❌ Erro ao forçar sincronização');
+			}, this.settings.syncInterval * 1000);
+		}
+	}
+
+	/**
+	 * Faz o download de tudo do servidor para o Vault
+	 */
+	async pullFromServer(silent: boolean = false): Promise<void> {
+		if (!silent) console.log('[SyncFull] pullFromServer() chamado');
+
+		if (!this.secureSyncManager) {
+			if (!silent) console.error('[SyncFull] SecureSyncManager não inicializado');
+			if (!silent && this.settings.enableNotifications) new Notice('❌ SyncFull: Sistema não inicializado');
+			return;
+		}
+
+		try {
+			if (!silent && this.settings.enableNotifications) new Notice('📥 Baixando alterações do servidor...');
+			const result = await this.secureSyncManager.downloadFromServer();
+
+			if (result.success) {
+				// Apenas loga no silent mode se algo foi processado
+				if (silent && result.operationsProcessed && result.operationsProcessed > 0) {
+					console.log(`[SyncFull] Polling: ${result.message}`);
+				}
+				if (!silent && this.settings.enableNotifications) new Notice(`✅ ${result.message}`);
+			} else {
+				if (!silent && this.settings.enableNotifications) new Notice(`❌ Erro no download: ${result.error}`);
 			}
+		} catch (error) {
+			console.error('[SyncFull] Erro no download:', error);
+			if (!silent && this.settings.enableNotifications) new Notice('❌ Erro inesperado ao baixar do servidor');
 		}
 	}
 

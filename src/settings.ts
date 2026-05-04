@@ -135,10 +135,10 @@ export class SyncFullSettingTab extends PluginSettingTab {
 			containerEl.createEl('h3', { text: '📱 Configurações do Cliente (Cópia)' });
 
 			new Setting(containerEl)
-				.setName('Endereço do Servidor')
-				.setDesc('Endereço de rede da PastaBase (ex: \\\\192.168.1.100\\SyncBase)')
+				.setName('Caminho da Pasta Compartilhada')
+				.setDesc('Caminho de rede para a PastaBase (ex: \\\\NAS\\SyncBase)')
 				.addText(text => text
-					.setPlaceholder('\\\\192.168.1.100\\SyncBase')
+					.setPlaceholder('\\\\NAS\\SyncBase ou /mnt/sync')
 					.setValue(this.plugin.settings.serverAddress)
 					.onChange(async (value) => {
 						this.plugin.settings.serverAddress = value;
@@ -161,13 +161,13 @@ export class SyncFullSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}));
 
-			// Botão para testar conexão com servidor
+			// Botão para testar conexão com a pasta
 			if (this.plugin.settings.serverAddress) {
 				new Setting(containerEl)
-					.setName('Testar Conexão com Servidor')
-					.setDesc('Verificar se é possível acessar a PastaBase')
+					.setName('Testar Acesso à Pasta Compartilhada')
+					.setDesc('Verificar se é possível acessar a PastaBase pela rede')
 					.addButton(button => button
-						.setButtonText('Testar Conexão')
+						.setButtonText('Testar Acesso')
 						.onClick(async () => {
 							await this.testServerConnection();
 						}));
@@ -198,6 +198,7 @@ export class SyncFullSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.autoSync = value;
 					await this.plugin.saveSettings();
+					this.plugin.startAutoSync();
 				}));
 
 		new Setting(containerEl)
@@ -210,6 +211,7 @@ export class SyncFullSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.syncInterval = value;
 					await this.plugin.saveSettings();
+					this.plugin.startAutoSync();
 				}));
 
 		new Setting(containerEl)
